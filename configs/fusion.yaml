@@ -1,0 +1,65 @@
+# ===== 融合配置 (fusion) =====
+# use_gtg_topology=true: 在 CRAFT GFA(GraphTransformer) 之前融合 GTG region 级拓扑特征。
+# CRAFT init_proj + gnn 权重键名不变 (旧 ckpt 可加载, 仅 gtg_branch/fusion_proj 为新增 missing keys)。
+
+# diffusion training config
+use_self_cond: True
+data_channels: 2
+seq_length: 24
+time_steps: 500
+sampling_time_steps: 500
+beta_schedule: 'linear'
+ddim_sampling_eta: 0.0
+time_emb_type: Sine
+
+# condition config
+raw_feature_dim: 45          # CRAFT 原始 45 维保持不变
+gat_layers: 4
+rep_dim: 128
+gat_heads: 4
+dropout: 0.1
+cond_emb_dim: 256
+refer_dim: 256
+refer_head_num: 4
+refer_layer_num: 2
+hour_dim: 64
+weekday_dim: 64
+month_dim: 64
+use_retrieve: True
+retrieve_top_k: 5
+retrieve_metric: euclidean
+use_self_reference: False
+
+# global training config
+device: 'cuda:0'
+pretrain_epoch: 8000
+diff_train_epoch: 300
+batch_size: 256
+lr: 0.5e-5
+ema_decay: 0.995
+update_every: 10
+
+use_sim_loss: True
+use_w_loss: True
+
+grid_len: -1
+
+# ablation
+use_region_emb: True
+use_time_emb: True
+use_month: False
+sample_num:
+  train: 30000
+  test: 10000
+
+# ===== 数据路径 (第一阶段新增; 只读 CRAFT, 写在 Paper) =====
+craft_data_root: /root/autodl-tmp/projects/CRAFT/cleared_data
+norm_flow_root: /root/autodl-tmp/projects/Paper/data/norm_flow
+
+# ===== GTG 融合开关与超参 =====
+use_gtg_topology: true
+gtg_cache_dir: /root/autodl-tmp/projects/Paper/cache/gtg
+gtg_feature_dim: 9           # connectivity/total_depth/integration/choice/mean_depth + 4 个分区池化
+gtg_gat_layers: 4            # GTG TopoAggregator 层数
+gtg_gat_heads: 8             # GTG GATv2 头数
+gtg_dropout: 0.1

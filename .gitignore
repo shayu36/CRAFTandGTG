@@ -1,0 +1,45 @@
+# Data and generated artifacts
+data/
+outputs/
+cache/
+logs/
+ckpt/
+checkpoints/
+models/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.npz
+*.npy
+*.csv
+*.parquet
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+
+# Python caches and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log

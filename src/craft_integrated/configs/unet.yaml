@@ -1,0 +1,11 @@
+device: 'cuda:0'
+use_self_cond: True
+data_channels: 2
+cond_emb_dim: 256
+init_dim: 64
+base_dim: 32
+dim_mults: [1, 2, 4, 8]
+sinusoidal_theta: 10000
+dropout: 0.1
+attn_dim_head: 64
+attn_heads: 4
