@@ -66,7 +66,7 @@ def pretrain_rep_model(cfg):
     for graph in graph_dict['src_graphs'] + graph_dict['trg_graphs']:
         city = graph.city
         with torch.no_grad():
-            reps = model(graph.x, graph.edge_index)
+            reps = model.encode_graph(graph)
         reps = reps.detach().cpu().numpy()
         np.save(join(exp_dir, f'{city}_rep.npy'), reps)
 

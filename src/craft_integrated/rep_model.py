@@ -7,6 +7,18 @@ import torch.nn.functional as F
 from pyg_compat import GATv2Conv
 from torch.autograd import Function
 
+try:
+    from static_hierarchy.model import ThreeLayerStaticEncoder
+    from static_hierarchy.contracts import CityStaticHierarchy
+except ModuleNotFoundError:  # 允许从 src/craft_integrated 直接执行旧入口
+    import pathlib
+    import sys
+    _SRC_ROOT = str(pathlib.Path(__file__).resolve().parents[1])
+    if _SRC_ROOT not in sys.path:
+        sys.path.insert(0, _SRC_ROOT)
+    from static_hierarchy.model import ThreeLayerStaticEncoder
+    from static_hierarchy.contracts import CityStaticHierarchy
+
 from graph_transformer_pytorch import GraphTransformer
 
 
@@ -86,14 +98,14 @@ def wasserstein_loss(src_emb, trg_emb, metric):
 class GTAggregator(nn.Module):
     def __init__(self, cfg):
         super().__init__()
-        self.device = cfg['device']
-        self.raw_feature_dim = cfg['raw_feature_dim']
-        self.retrieve_metric = cfg['retrieve_metric']
+        self.device = cfg.get('device', 'cpu')
+        self.raw_feature_dim = cfg.get('raw_feature_dim', 45)
+        self.retrieve_metric = cfg.get('retrieve_metric', 'euclidean')
         self.rep_dim = cfg['rep_dim']
 
         # note
-        self.use_sim_loss = cfg['use_sim_loss']
-        self.use_w_loss = cfg['use_w_loss']
+        self.use_sim_loss = cfg.get('use_sim_loss', True)
+        self.use_w_loss = cfg.get('use_w_loss', True)
         assert self.use_sim_loss or self.use_w_loss  # 不能同时为 False
 
         # self.init_proj = nn.Sequential(
@@ -102,22 +114,35 @@ class GTAggregator(nn.Module):
         #     nn.ReLU(),
         #     nn.Linear(self.rep_dim, self.rep_dim)
         # )
-        self.init_proj = FeatureInitLayer(raw_feature_dim=self.raw_feature_dim, rep_dim=self.rep_dim)
-        self.gnn = GraphTransformer(
-            dim=self.rep_dim,
-            depth=3,
-            heads=4,
-            dim_head=64,
-            with_feedforwards=True,
-            rel_pos_emb=False,
-            accept_adjacency_matrix=True
+        self.static_structure_mode = cfg.get(
+            'static_structure_mode',
+            'flat_gtg_region' if cfg.get('use_gtg_topology', False) else 'craft_only',
         )
+        if self.static_structure_mode not in {'craft_only', 'flat_gtg_region', 'three_layer'}:
+            raise ValueError(f'未知 static_structure_mode={self.static_structure_mode!r}')
+        if self.static_structure_mode == 'three_layer':
+            if cfg.get('use_gtg_topology', False):
+                raise ValueError('three_layer mode and flat GTG region fusion cannot be enabled together')
+            self.three_layer_encoder = ThreeLayerStaticEncoder(cfg)
+        else:
+            self.init_proj = FeatureInitLayer(raw_feature_dim=self.raw_feature_dim, rep_dim=self.rep_dim)
+            self.gnn = GraphTransformer(
+                dim=self.rep_dim,
+                depth=3,
+                heads=4,
+                dim_head=64,
+                with_feedforwards=True,
+                rel_pos_emb=False,
+                accept_adjacency_matrix=True
+            )
 
         # ===== GTG 拓扑融合分支 (第一阶段新增) =====
         # use_gtg_topology=False 时结构与原 CRAFT 逐字节等价, 旧 ckpt 完全可加载。
         # use_gtg_topology=True 时: 输入节点特征为 [craft(raw_feature_dim) | gtg(gtg_feature_dim)],
         #   craft 部分走 init_proj, gtg 部分走 GTGTopoBranch, 二者在 GFA(GraphTransformer) 之前融合。
         self.use_gtg_topology = cfg.get('use_gtg_topology', False)
+        if self.static_structure_mode == 'three_layer':
+            self.use_gtg_topology = False
         if self.use_gtg_topology:
             self.gtg_feature_dim = cfg['gtg_feature_dim']
             self.gtg_branch = GTGTopoBranch(
@@ -134,7 +159,13 @@ class GTAggregator(nn.Module):
                 nn.Linear(self.rep_dim, self.rep_dim),
             )
 
-    def forward(self, nodes, edge_index):
+    def forward(self, nodes, edge_index=None):
+        if self.static_structure_mode == 'three_layer':
+            if not isinstance(nodes, CityStaticHierarchy):
+                raise TypeError('three_layer 模式 forward 需要 CityStaticHierarchy')
+            return self.three_layer_encoder(nodes)
+        if edge_index is None:
+            raise TypeError('craft_only/flat_gtg_region 模式 forward 需要 edge_index')
         nodes = nodes.to(self.device)
         edge_index = edge_index.to(self.device)
         num_nodes = nodes.shape[0]
@@ -161,11 +192,19 @@ class GTAggregator(nn.Module):
         nodes = nodes.squeeze()
         return nodes
 
+    def encode_graph(self, graph):
+        """编码旧 CRAFT graph 或三层 CityStaticHierarchy。"""
+        if self.static_structure_mode == 'three_layer':
+            hierarchy = graph if isinstance(graph, CityStaticHierarchy) else getattr(graph, 'static_hierarchy', None)
+            if hierarchy is None:
+                raise TypeError('three_layer 模式 graph 缺少 CityStaticHierarchy')
+            return self.three_layer_encoder(hierarchy)
+        return self.forward(graph.x, graph.edge_index)
+
     def get_multi_graph_embs(self, graphs):
         src_emb = []
         for graph in graphs:
-            node_feature, edge_index = graph.x.to(self.device), graph.edge_index.to(self.device)
-            reps = self.forward(node_feature, edge_index)
+            reps = self.encode_graph(graph)
             src_emb.append(reps)
         src_emb = torch.cat(src_emb, dim=0)
         return src_emb
@@ -208,8 +247,7 @@ class GTAggregator(nn.Module):
         src_emb, src_value = [], []
         # 源城市
         for graph in src_graphs:
-            node_feature, edge_index = graph.x.to(self.device), graph.edge_index.to(self.device)
-            reps = self.forward(node_feature, edge_index)
+            reps = self.encode_graph(graph)
             # 仅有正值训练窗口的区域参与流量-表征监督；完整区域图仍
             # 参与 GNN 消息传播，不对无监督区域伪造零流量。
             value_region_ids = getattr(graph, 'value_region_ids', None)
@@ -228,8 +266,7 @@ class GTAggregator(nn.Module):
         # 目标城市
         trg_emb = []
         for graph in trg_graphs:
-            node_feature, edge_index = graph.x.to(self.device), graph.edge_index.to(self.device)
-            reps = self.forward(node_feature, edge_index)
+            reps = self.encode_graph(graph)
             trg_emb.append(reps)
         trg_emb = torch.cat(trg_emb)
 

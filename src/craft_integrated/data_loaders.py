@@ -8,7 +8,15 @@ from torch.utils.data import Dataset, DataLoader
 from pyg_compat import Data
 from tqdm import tqdm
 
-from retrieve import Retriever
+try:
+    from static_hierarchy.data import load_city_static_hierarchy
+except ModuleNotFoundError:  # 允许从 src/craft_integrated 直接执行
+    import pathlib
+    import sys
+    _SRC_ROOT = str(pathlib.Path(__file__).resolve().parents[1])
+    if _SRC_ROOT not in sys.path:
+        sys.path.insert(0, _SRC_ROOT)
+    from static_hierarchy.data import load_city_static_hierarchy
 
 
 # ===== 数据路径与 GTG 融合配置 (第一阶段新增) =====
@@ -19,18 +27,39 @@ _USE_GTG_TOPOLOGY = False               # 是否在区域特征后拼接 GTG 拓
 _GTG_CACHE_DIR = None                   # GTG region 级特征缓存目录
 _GTG_FEATURE_DIM = None                 # 期望的 GTG 特征维度 (严格校验)
 _CITY_DATA_DIRS = {}                    # 可选: {city: 该城市静态 CSV 目录}
+_STATIC_STRUCTURE_MODE = 'craft_only'   # craft_only / flat_gtg_region / three_layer
+_STATIC_HIERARCHY_CACHE_DIR = None
+_EMPTY_REGION_ERROR_RATIO = 0.2
+_ROAD_FEATURE_MODE = 'topology_only'
 
 
 def configure(cfg):
     """从配置注入数据路径与 GTG 融合开关 (只读 CRAFT, 归一化/缓存写在 Paper)。"""
     global _CRAFT_DATA_ROOT, _NORM_FLOW_ROOT, _USE_GTG_TOPOLOGY, _GTG_CACHE_DIR, _GTG_FEATURE_DIM
-    global _CITY_DATA_DIRS
+    global _CITY_DATA_DIRS, _STATIC_STRUCTURE_MODE, _STATIC_HIERARCHY_CACHE_DIR
+    global _EMPTY_REGION_ERROR_RATIO, _ROAD_FEATURE_MODE
     _CRAFT_DATA_ROOT = cfg.get('craft_data_root', 'cleared_data')
     _NORM_FLOW_ROOT = cfg.get('norm_flow_root', None)
     _USE_GTG_TOPOLOGY = cfg.get('use_gtg_topology', False)
     _GTG_CACHE_DIR = cfg.get('gtg_cache_dir', None)
     _GTG_FEATURE_DIM = cfg.get('gtg_feature_dim', None)
     _CITY_DATA_DIRS = cfg.get('city_data_dirs', {}) or {}
+    _STATIC_STRUCTURE_MODE = cfg.get('static_structure_mode', 'flat_gtg_region' if _USE_GTG_TOPOLOGY else 'craft_only')
+    if _STATIC_STRUCTURE_MODE not in {'craft_only', 'flat_gtg_region', 'three_layer'}:
+        raise ValueError(f'未知 static_structure_mode={_STATIC_STRUCTURE_MODE!r}')
+    if _STATIC_STRUCTURE_MODE == 'three_layer' and _USE_GTG_TOPOLOGY:
+        raise ValueError('three_layer mode and flat GTG region fusion cannot be enabled together')
+    _STATIC_HIERARCHY_CACHE_DIR = cfg.get('static_hierarchy_cache_dir', None)
+    if _STATIC_STRUCTURE_MODE == 'three_layer' and _STATIC_HIERARCHY_CACHE_DIR is None:
+        raise ValueError('严格模式: three_layer 模式必须提供 static_hierarchy_cache_dir')
+    _EMPTY_REGION_ERROR_RATIO = float(cfg.get('empty_region_error_ratio', 0.2))
+    if not 0 <= _EMPTY_REGION_ERROR_RATIO <= 1:
+        raise ValueError('严格模式: empty_region_error_ratio 必须在 [0,1]')
+    _ROAD_FEATURE_MODE = cfg.get('road_feature_mode', 'topology_only')
+    if _ROAD_FEATURE_MODE == 'cospec':
+        raise NotImplementedError('CoSpec road features are not implemented in Stage 1')
+    if _ROAD_FEATURE_MODE != 'topology_only':
+        raise ValueError(f'未知 road_feature_mode={_ROAD_FEATURE_MODE!r}')
     if not isinstance(_CITY_DATA_DIRS, dict):
         raise ValueError('严格模式: city_data_dirs 必须是 {city: city_dir} mapping')
     if _USE_GTG_TOPOLOGY and _GTG_CACHE_DIR is None:
@@ -112,6 +141,8 @@ def get_retriever(city_data_list, match_month=True):
     """
     :param city_data_list: [{'feature': np.ndarray, 'flow_df': pd.DataFrame}]
     """
+    # 仅 Diffusion/RAG 数据路径需要 Retriever；静态三层入口不导入该模块。
+    from retrieve import Retriever
     base_idx = 0
     item_data_list = []
     total_features = []
@@ -336,11 +367,74 @@ def load_region_feature(city, feature_cols=None):
     return node_feature, edge_index
 
 
-def load_region_graph(city):
+def _load_three_layer_region_graph(city, require_flow_labels=True):
+    if _STATIC_HIERARCHY_CACHE_DIR is None:
+        raise ValueError('严格模式: three_layer 模式未配置 static_hierarchy_cache_dir')
+    hierarchy = load_city_static_hierarchy(_STATIC_HIERARCHY_CACHE_DIR, city)
+    empty_ratio = float(hierarchy.metadata['empty_region_ratio'])
+    if empty_ratio > _EMPTY_REGION_ERROR_RATIO:
+        raise ValueError(
+            f'严格模式: {city} 空 Region 映射比例 {empty_ratio:.3f} '
+            f'超阈值 {_EMPTY_REGION_ERROR_RATIO}'
+        )
+    if not require_flow_labels:
+        return hierarchy
+    flow_df = load_norm_flow(city=city, seq_length=24, phase='train')
+    required_columns = {'region_id', 'norm_flow'}
+    missing = required_columns - set(flow_df.columns)
+    if missing:
+        raise ValueError(f'严格模式: {city} norm train 缺少列 {sorted(missing)}')
+    groups = flow_df.groupby('region_id')
+    region_values = {}
+    for region_id, group in groups:
+        try:
+            numeric_region_id = float(region_id)
+            if not np.isfinite(numeric_region_id) or numeric_region_id != int(numeric_region_id):
+                raise ValueError
+            region_id = int(numeric_region_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'严格模式: {city} norm train region_id 非整数: {region_id!r}') from exc
+        if region_id < 0 or region_id >= hierarchy.num_regions:
+            raise ValueError(
+                f'严格模式: {city} norm train region_id={region_id} 超出静态 Region 范围 '
+                f'[0,{hierarchy.num_regions})'
+            )
+        values = np.asarray(group['norm_flow'].tolist())
+        try:
+            values_finite = bool(np.isfinite(values).all())
+        except (TypeError, ValueError):
+            values_finite = False
+        if values.ndim != 3 or values.shape[1:] != (2, 24) or not values_finite:
+            raise ValueError(
+                f'严格模式: {city} region_id={region_id} norm_flow shape/finite 异常: {values.shape}'
+            )
+        region_values[region_id] = values.mean(axis=0).reshape(-1)
+    if not region_values:
+        raise ValueError(f'严格模式: {city} norm train 没有可用于 TFA 的 Region value')
+    active_ids = sorted(region_values)
+    values = np.stack([region_values[rid] for rid in active_ids])
+    if values.shape != (len(active_ids), 48) or not np.isfinite(values).all():
+        raise ValueError(f'严格模式: {city} source Region value shape/finite 异常: {values.shape}')
+    hierarchy.value = torch.tensor(values, dtype=torch.float32)
+    hierarchy.value_region_ids = torch.tensor(active_ids, dtype=torch.long)
+    hierarchy.value_mask = torch.zeros(hierarchy.num_regions, dtype=torch.bool)
+    hierarchy.value_mask[hierarchy.value_region_ids] = True
+    # Re-run the complete contract after attaching source-only dynamic labels.
+    from static_hierarchy.contracts import validate_city_static_hierarchy
+    validate_city_static_hierarchy(hierarchy)
+    return hierarchy
+
+
+def load_region_graph(city, require_flow_labels=True):
+    """加载区域图；target 可显式 ``require_flow_labels=False`` 避免读取动态流量。"""
+    if _STATIC_STRUCTURE_MODE == 'three_layer':
+        return _load_three_layer_region_graph(city, require_flow_labels=require_flow_labels)
     node_feature, edge_index = load_region_feature(city=city)
     node_feature = torch.tensor(node_feature, dtype=torch.float32)
     edge_index = torch.LongTensor(edge_index)
 
+    if not require_flow_labels:
+        return Data(x=node_feature, edge_index=edge_index, city=city)
     flow_df = load_norm_flow(city=city, seq_length=24, phase='train')
     # 正值筛选可能使某些静态区域没有训练窗口；图级对齐值使用各
     # active region 的全部训练窗口均值，无监督区域由 value_mask 标记，
@@ -372,8 +466,8 @@ def load_region_graph(city):
 
 
 def get_graph_datasets(src_cities, trg_cities):
-    src_graphs = [load_region_graph(city=src_city) for src_city in src_cities]
-    trg_graphs = [load_region_graph(city=trg_city) for trg_city in trg_cities]
+    src_graphs = [load_region_graph(city=src_city, require_flow_labels=True) for src_city in src_cities]
+    trg_graphs = [load_region_graph(city=trg_city, require_flow_labels=False) for trg_city in trg_cities]
 
     return {
         'src_graphs': src_graphs,

@@ -1,0 +1,41 @@
+# 第一阶段三层城市静态图：Road → Spatial Syntax → CRAFT Region。
+# target_city 必须由命令行或本文件显式提供，不设置默认目标城市。
+static_structure_mode: three_layer
+road_feature_mode: topology_only
+
+rep_dim: 128
+raw_feature_dim: 45
+road_topo_feature_dim: 4
+road_gat_layers: 4
+road_gat_heads: 8
+road_dropout: 0.1
+syntax_feature_dim: 5
+syntax_gat_layers: 2
+syntax_gat_heads: 4
+syntax_dropout: 0.1
+metis_local_size: 50
+empty_region_error_ratio: 0.2
+
+craft_data_root: ../CRAFT/cleared_data
+norm_flow_root: data/norm_flow
+gtg_syntax_cache_dir: cache/gtg
+static_hierarchy_cache_dir: cache/static_hierarchy
+static_rep_output_dir: outputs/stage1_static
+city_data_dirs:
+  beijing: data/gtg_craft/beijing
+  chengdushi: data/gtg_craft/chengdushi
+  xianshi: data/gtg_craft/xianshi
+
+source_cities:
+  - beijing
+  - chengdushi
+  - xianshi
+target_city: null
+
+# 仅用于沿用 CRAFT 原有 TFA/self-similarity 与 CCA/Wasserstein。
+# 不新增任何三层或 GTG 专属损失。
+use_sim_loss: true
+use_w_loss: true
+device: cpu
+pretrain_epoch: 1
+seed: 20260828
