@@ -1,0 +1,10 @@
+base_config: A3_macro_fm_hierarchy.yaml
+use_micro_adversarial: true
+loss:
+  cost: 0.1
+  rank: 0.1
+  semantic_domain: 0.01
+  domain: 0.01
+  orthogonal: 0.01
+training:
+  phase: macro_adversarial

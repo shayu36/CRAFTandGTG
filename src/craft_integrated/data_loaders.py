@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from os.path import join
 from torch.utils.data import Dataset, DataLoader
-from torch_geometric.data import Data
+from pyg_compat import Data
 from tqdm import tqdm
 
 from retrieve import Retriever
@@ -18,18 +18,28 @@ _NORM_FLOW_ROOT = None                  # None 时回退到 _CRAFT_DATA_ROOT (�
 _USE_GTG_TOPOLOGY = False               # 是否在区域特征后拼接 GTG 拓扑特征
 _GTG_CACHE_DIR = None                   # GTG region 级特征缓存目录
 _GTG_FEATURE_DIM = None                 # 期望的 GTG 特征维度 (严格校验)
+_CITY_DATA_DIRS = {}                    # 可选: {city: 该城市静态 CSV 目录}
 
 
 def configure(cfg):
     """从配置注入数据路径与 GTG 融合开关 (只读 CRAFT, 归一化/缓存写在 Paper)。"""
     global _CRAFT_DATA_ROOT, _NORM_FLOW_ROOT, _USE_GTG_TOPOLOGY, _GTG_CACHE_DIR, _GTG_FEATURE_DIM
+    global _CITY_DATA_DIRS
     _CRAFT_DATA_ROOT = cfg.get('craft_data_root', 'cleared_data')
     _NORM_FLOW_ROOT = cfg.get('norm_flow_root', None)
     _USE_GTG_TOPOLOGY = cfg.get('use_gtg_topology', False)
     _GTG_CACHE_DIR = cfg.get('gtg_cache_dir', None)
     _GTG_FEATURE_DIM = cfg.get('gtg_feature_dim', None)
+    _CITY_DATA_DIRS = cfg.get('city_data_dirs', {}) or {}
+    if not isinstance(_CITY_DATA_DIRS, dict):
+        raise ValueError('严格模式: city_data_dirs 必须是 {city: city_dir} mapping')
     if _USE_GTG_TOPOLOGY and _GTG_CACHE_DIR is None:
         raise ValueError('严格模式: use_gtg_topology=True 但未提供 gtg_cache_dir')
+
+
+def _get_city_data_dir(city):
+    """GTG 源城市可覆盖到 Paper 输出目录；CRAFT 目标城市仍读默认只读根。"""
+    return _CITY_DATA_DIRS.get(city, join(_CRAFT_DATA_ROOT, city))
 
 
 def load_norm_flow(city, seq_length, phase):
@@ -98,7 +108,7 @@ class FlowDataset(Dataset):
         return batch
 
 
-def get_retriever(city_data_list):
+def get_retriever(city_data_list, match_month=True):
     """
     :param city_data_list: [{'feature': np.ndarray, 'flow_df': pd.DataFrame}]
     """
@@ -123,7 +133,11 @@ def get_retriever(city_data_list):
                 'value': value
             })
     total_features = np.concatenate(total_features)
-    retriever = Retriever(data_list=item_data_list, features=total_features)
+    retriever = Retriever(
+        data_list=item_data_list,
+        features=total_features,
+        match_month=match_month,
+    )
     return retriever
 
 
@@ -131,6 +145,7 @@ def get_source_train_datasets(cfg, phase):
     exp_dir = cfg['exp_dir']
     src_cities = cfg['src_cities']
     seq_length = cfg['seq_length']
+    match_month = cfg.get('retrieve_match_month', True)
     # 在训练阶段, 使用训练集本身作为检索数据源
     refer_flow_dfs = []
     for city in src_cities:
@@ -142,10 +157,17 @@ def get_source_train_datasets(cfg, phase):
         flow_df['city'] = city
         refer_flow_dfs.append(flow_df)
     refer_df = pd.concat(refer_flow_dfs)
-    refer_group_dict = {
-        (month, weekday, start_hour): group
-        for (month, weekday, start_hour), group in refer_df.groupby(by=['month', 'weekday', 'start_hour'])
-    }
+    if match_month:
+        refer_group_dict = {
+            (month, weekday, start_hour): group
+            for (month, weekday, start_hour), group
+            in refer_df.groupby(by=['month', 'weekday', 'start_hour'])
+        }
+    else:
+        refer_group_dict = {
+            (weekday, start_hour): group
+            for (weekday, start_hour), group in refer_df.groupby(by=['weekday', 'start_hour'])
+        }
     dataset_list = []
     for city in src_cities:
         data_sample_list = []
@@ -154,7 +176,17 @@ def get_source_train_datasets(cfg, phase):
         flow_df = load_norm_flow(city, seq_length=seq_length, phase=phase)
         for _, row in tqdm(flow_df.iterrows(), total=len(flow_df), desc='load source city samples'):
             # 查找源城市其他 region 的相似样本, 获取训练阶段用的 reference
-            candidates = refer_group_dict.get((row['month'], row['weekday'], row['start_hour']))
+            retrieve_key = (
+                (row['month'], row['weekday'], row['start_hour'])
+                if match_month
+                else (row['weekday'], row['start_hour'])
+            )
+            candidates = refer_group_dict.get(retrieve_key)
+            if candidates is None:
+                raise ValueError(
+                    f"严格模式: 源域 reference 无候选 key={retrieve_key}, "
+                    f"retrieve_match_month={match_month}"
+                )
             candidates = candidates[(candidates['city'] != city) | (candidates['region_id'] != row['region_id'])]
             if len(candidates) == 0:
                 # 在训练阶段, 如果其他 region 中没有命中的样本, 则使用本身作为 reference
@@ -191,6 +223,7 @@ def get_test_dataloader(cfg):
     exp_dir = cfg['exp_dir']
     src_cities, trg_cities = cfg['src_cities'], cfg['trg_cities']
     seq_length = cfg['seq_length']
+    match_month = cfg.get('retrieve_match_month', True)
 
     # 检索数据源是源城市的训练集
     retrieve_data_list = [
@@ -207,7 +240,10 @@ def get_test_dataloader(cfg):
     loaders_dict = dict()
     for trg_city in trg_cities:
         # 确保 retriever 不包含目标城市
-        retriever = get_retriever([item for item in retrieve_data_list if item['city'] != trg_city])
+        retriever = get_retriever(
+            [item for item in retrieve_data_list if item['city'] != trg_city],
+            match_month=match_month,
+        )
 
         data_list = []
         trg_feature = np.load(join(exp_dir, f'{trg_city}_rep.npy'))
@@ -266,20 +302,25 @@ def _load_gtg_region_feature(city, num_regions):
 def load_region_feature(city, feature_cols=None):
     poi_type_num = 12
     road_type_num = 8
-    data_dir = _CRAFT_DATA_ROOT
+    city_dir = _get_city_data_dir(city)
 
-    region_df = pd.read_csv(join(data_dir, city, 'grid_region_feature.csv'))
+    region_df = pd.read_csv(join(city_dir, 'grid_region_feature.csv'))
     if feature_cols is None:
         feature_cols = (['population', 'population_density', 'dist_to_center', 'road_num', 'road_length']
                         + [f'poi_num_{k}' for k in range(poi_type_num)]
                         + [f'poi_score_{k}' for k in range(poi_type_num)]
                         + [f'road_num_{k}' for k in range(road_type_num)]
                         + [f'road_length_{k}' for k in range(road_type_num)])
-    region_df = region_df.fillna(0)
+    missing_cols = sorted(set(feature_cols) - set(region_df.columns))
+    if missing_cols:
+        raise ValueError(f'严格模式: {city} grid_region_feature 缺少列 {missing_cols}')
+    numeric_feature = region_df[feature_cols].apply(pd.to_numeric, errors='coerce')
+    if numeric_feature.isna().any().any() or not np.isfinite(numeric_feature.to_numpy()).all():
+        raise ValueError(f'严格模式: {city} 45 维静态特征含非数值/NaN/Inf, 禁止静默补零')
 
     # 确保 region_id 是从 0 开始编号的
     assert all(rid == idx for idx, rid in enumerate(region_df['region_id'].tolist())), 'region_id != index'
-    node_feature = region_df[feature_cols].to_numpy()
+    node_feature = numeric_feature.to_numpy()
 
     # ===== 融合模式: 在 CRAFT 45 维特征后拼接 GTG 拓扑特征 =====
     # forward 阶段按 raw_feature_dim=45 切分, 前 45 维走 init_proj, 后 K 维走 GTG 分支。
@@ -288,7 +329,7 @@ def load_region_feature(city, feature_cols=None):
         node_feature = np.concatenate([node_feature, gtg_feat], axis=1)
 
     # 加载邻接关系
-    rel_df = pd.read_csv(join(data_dir, city, 'grid_region_rel.csv'))
+    rel_df = pd.read_csv(join(city_dir, 'grid_region_rel.csv'))
     rel_df = rel_df[rel_df['is_adj'] == 1]
     edge_index = rel_df[['ori', 'des']].to_numpy().T
 
@@ -301,18 +342,32 @@ def load_region_graph(city):
     edge_index = torch.LongTensor(edge_index)
 
     flow_df = load_norm_flow(city=city, seq_length=24, phase='train')
-    flow_df = flow_df[flow_df['start_hour'] == 0]
+    # 正值筛选可能使某些静态区域没有训练窗口；图级对齐值使用各
+    # active region 的全部训练窗口均值，无监督区域由 value_mask 标记，
+    # 不伪造零流量。
     groups = flow_df.groupby('region_id')
     region_values = {
         region_id: np.mean(group['norm_flow'].tolist(), axis=0).flatten()
         for region_id, group in groups
     }
-    values = np.stack([
-        region_values.get(region_id, np.zeros(48))
-        for region_id in range(len(node_feature))
-    ])
+    active_region_ids = sorted(int(region_id) for region_id in region_values)
+    if not active_region_ids:
+        raise ValueError(f'严格模式: {city} norm train 没有任何可用 region_id')
+    values = np.stack([region_values[region_id] for region_id in active_region_ids])
+    if values.shape[1] != 48 or not np.isfinite(values).all():
+        raise ValueError(f'严格模式: {city} active region 流量值形状/finite 异常: {values.shape}')
     values = torch.tensor(values, dtype=torch.float32)
-    graph = Data(x=node_feature, edge_index=edge_index, value=values, city=city)
+    value_region_ids = torch.tensor(active_region_ids, dtype=torch.long)
+    value_mask = torch.zeros(len(node_feature), dtype=torch.bool)
+    value_mask[value_region_ids] = True
+    graph = Data(
+        x=node_feature,
+        edge_index=edge_index,
+        value=values,
+        value_region_ids=value_region_ids,
+        value_mask=value_mask,
+        city=city,
+    )
     return graph
 
 

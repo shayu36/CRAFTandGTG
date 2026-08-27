@@ -1,0 +1,54 @@
+model_mode: macro_flow_matching
+generator_type: flow_matching
+use_gtg: true
+use_hierarchy: false
+use_micro_adversarial: false
+generate_macro: true
+generate_micro: false
+prior_mode: independent
+ode_solver: euler
+ode_steps: 16
+use_cross_state: false
+use_cross_velocity: false
+freeze_macro_encoder: false
+freeze_micro_encoder: true
+
+model:
+  seq_length: 24
+  rep_dim: 128
+  refer_dim: 256
+  refer_heads: 4
+  refer_layers: 2
+  hour_dim: 64
+  weekday_dim: 64
+  month_dim: 64
+flow_matching:
+  prior_mode: independent
+  solver: euler
+  steps: 16
+  hidden_dim: 64
+  num_blocks: 4
+  time_dim: 64
+  dropout: 0.1
+loss:
+  fm_macro: 1.0
+  fm_micro: 0.0
+  cross_state: 0.0
+  cross_velocity: 0.0
+  topology: 0.0
+  cost: 0.0
+  rank: 0.0
+  semantic_domain: 0.0
+  domain: 0.0
+  orthogonal: 0.0
+  gfa: 0.0
+training:
+  phase: macro_fm
+  lr: 0.000005
+  seed: 20260819
+  epochs: 300
+paths:
+  craft_data_root: ../CRAFT/cleared_data
+  norm_flow_root: data/norm_flow
+  gtg_cache_dir: cache/gtg
+  hierarchy_cache_dir: cache/hcfm

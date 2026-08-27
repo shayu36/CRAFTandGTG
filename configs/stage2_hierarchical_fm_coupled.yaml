@@ -1,0 +1,11 @@
+base_config: stage2_hierarchical_fm.yaml
+prior_mode: coupled
+use_cross_velocity: true
+flow_matching:
+  prior_mode: coupled
+  solver: heun
+loss:
+  cross_velocity: 0.05
+training:
+  phase: coupled_velocity
+

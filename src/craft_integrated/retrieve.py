@@ -4,7 +4,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 
 class Retriever:
-    def __init__(self, data_list, features):
+    def __init__(self, data_list, features, match_month=True):
         """
         :param data_list [{
             'region_idx': int, 不是 region_id, 而是多个城市堆叠的 features 的索引
@@ -29,6 +29,7 @@ class Retriever:
             } for idx, item in enumerate(data_list)]
         )
         self.features = features
+        self.match_month = bool(match_month)
 
     @staticmethod
     def get_top_k_indices(query, candidates, top_k, metric='cosine'):
@@ -52,12 +53,22 @@ class Retriever:
         weekday = query_info['weekday']
         start_hour = query_info['start_hour']
         feature = query_info['feature']
-        candidate_info = self.data_info_df[
-            (self.data_info_df['month'] == month) &
+        temporal_mask = (
             (self.data_info_df['weekday'] == weekday) &
             (self.data_info_df['start_hour'] == start_hour)
-        ]
-        regions = candidate_info['region_idx'].tolist()
+        )
+        if self.match_month:
+            temporal_mask &= self.data_info_df['month'] == month
+        candidate_info = self.data_info_df[temporal_mask]
+        if candidate_info.empty:
+            condition = 'month+weekday+start_hour' if self.match_month else 'weekday+start_hour'
+            raise ValueError(
+                '严格模式: 检索无候选 '
+                f'(condition={condition}, month={month}, weekday={weekday}, start_hour={start_hour})'
+            )
+        # 取消月份条件后，同一区域可能按月出现多行。top-k 必须针对不同区域，
+        # 不能让同一区域因月份多而重复占位；选中区域后再汇总其全部候选月份流量。
+        regions = candidate_info['region_idx'].drop_duplicates().tolist()
         candidates = self.features[regions]
         top_idx = self.get_top_k_indices(query=feature, candidates=candidates, top_k=top_k, metric=metric)
         top_region_idx = [regions[idx] for idx in top_idx]
@@ -65,4 +76,3 @@ class Retriever:
         value = np.concatenate([self.idx_to_value[idx] for idx in value_idx], axis=0)
         reference = np.mean(value,  axis=0)
         return reference
-

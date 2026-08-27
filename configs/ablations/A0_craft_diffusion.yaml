@@ -1,0 +1,4 @@
+base_config: ../stage1_diffusion.yaml
+use_gtg: false
+use_gtg_topology: false
+

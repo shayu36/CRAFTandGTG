@@ -28,6 +28,7 @@ month_dim: 64
 use_retrieve: True
 retrieve_top_k: 5
 retrieve_metric: euclidean
+retrieve_match_month: false   # 与 fusion 使用相同检索协议，保证公平对照
 use_self_reference: False
 
 # global training config
@@ -38,6 +39,7 @@ batch_size: 256
 lr: 0.5e-5
 ema_decay: 0.995
 update_every: 10
+use_source_validation: false  # 与 fusion 使用同一无源域验证协议
 
 use_sim_loss: True
 use_w_loss: True
@@ -55,6 +57,10 @@ sample_num:
 # ===== 数据路径 (第一阶段新增; 只读 CRAFT, 写在 Paper) =====
 craft_data_root: /root/autodl-tmp/projects/CRAFT/cleared_data
 norm_flow_root: /root/autodl-tmp/projects/Paper/data/norm_flow
+city_data_dirs:
+  beijing: /root/autodl-tmp/projects/Paper/data/gtg_craft/beijing
+  chengdushi: /root/autodl-tmp/projects/Paper/data/gtg_craft/chengdushi
+  xianshi: /root/autodl-tmp/projects/Paper/data/gtg_craft/xianshi
 
 # ===== GTG 融合开关 =====
 use_gtg_topology: false

@@ -1,5 +1,6 @@
 import math
 import yaml
+from pathlib import Path
 from random import random
 from functools import partial
 import torch
@@ -16,7 +17,8 @@ def load_noise_estimator(cfg):
             local_cfg[key] = val
         return local_cfg
 
-    estimator_cfg = yaml.safe_load(open('configs/unet.yaml', 'r'))
+    estimator_cfg_path = Path(__file__).resolve().parent / 'configs' / 'unet.yaml'
+    estimator_cfg = yaml.safe_load(open(estimator_cfg_path, 'r'))
     estimator_cfg = update_cfg(cfg, estimator_cfg)
     model = Unet1D(estimator_cfg).to(cfg['device'])
     return model

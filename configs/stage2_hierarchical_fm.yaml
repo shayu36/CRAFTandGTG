@@ -1,0 +1,81 @@
+model_mode: hierarchical_flow_matching
+generator_type: flow_matching
+use_gtg: true
+use_hierarchy: true
+use_micro_adversarial: true
+generate_macro: true
+generate_micro: true
+prior_mode: independent
+ode_solver: euler
+ode_steps: 16
+use_cross_state: true
+use_cross_velocity: false
+freeze_macro_encoder: false
+freeze_micro_encoder: false
+
+model:
+  seq_length: 24
+  rep_dim: 128
+  road_dim: 15
+  road_hidden_dim: 128
+  refer_dim: 256
+  refer_heads: 4
+  refer_layers: 2
+  hour_dim: 64
+  weekday_dim: 64
+  month_dim: 64
+hierarchy:
+  enabled: true
+  num_layers: 1
+  fusion: gated_residual
+  bidirectional: true
+micro_adversarial:
+  enabled: true
+  num_layers: 4
+  heads: 4
+  dropout: 0.1
+  edge_dim: null
+  cost_dim: 2
+  num_domains: 4
+  grl_coefficient: 1.0
+flow_matching:
+  prior_mode: independent
+  solver: euler
+  steps: 16
+  hidden_dim: 64
+  num_blocks: 4
+  time_dim: 64
+  dropout: 0.1
+loss:
+  fm_macro: 1.0
+  fm_micro: 1.0
+  cross_state: 0.1
+  cross_velocity: 0.0
+  topology: 0.1
+  cost: 0.1
+  rank: 0.1
+  semantic_domain: 0.01
+  domain: 0.01
+  orthogonal: 0.01
+  gfa: 1.0
+training:
+  phase: cross_state
+  lr: 0.000005
+  seed: 20260819
+  epochs: 300
+paths:
+  craft_data_root: ../CRAFT/cleared_data
+  norm_flow_root: data/norm_flow
+  gtg_cache_dir: cache/gtg
+  hierarchy_cache_dir: cache/hcfm
+  micro_flow_root: null
+data:
+  data_version: hcfm-v1
+  timezone_required: true
+  batch_size: 1
+  strict: true
+rag:
+  level: region
+  source_split: train
+  top_k: 5
+  metric: euclidean

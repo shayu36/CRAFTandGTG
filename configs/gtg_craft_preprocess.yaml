@@ -1,0 +1,46 @@
+# GTG 三城 -> CRAFT 兼容车辆边界穿越流量。
+# 严格配置：外部 POI/道路/人口文件缺失时明确失败，不会用 0 占位。
+
+timezone: Asia/Shanghai
+use_source_validation: false
+grid_size_m: 2000
+seq_length: 24
+trajectory_chunksize: 100000
+ambiguous_interval_error_ratio: 0.001
+
+output_root: ../data/gtg_craft
+norm_output_root: ../data/norm_flow
+
+cities:
+  beijing:
+    gtg_dir: ../data/beijing
+    osm_poi: ../data/external_2026/beijing/osm_poi_2026.geojson
+    osm_poi_layer: null
+    osm_roads: ../data/external_2026/beijing/osm_roads_2026.geojson
+    osm_road_layer: null
+    population: ../data/external_2026/beijing/population_2026.csv
+    osm_snapshot_date: 2026-08-21
+    population_year: 2026
+    validation_start: null        # 学长确认：不设置 GTG 源域验证集
+
+  chengdushi:
+    gtg_dir: ../data/chengdushi
+    osm_poi: ../data/external_2026/chengdushi/osm_poi_2026.geojson
+    osm_poi_layer: null
+    osm_roads: ../data/external_2026/chengdushi/osm_roads_2026.geojson
+    osm_road_layer: null
+    population: ../data/external_2026/chengdushi/population_2026.csv
+    osm_snapshot_date: 2026-08-21
+    population_year: 2026
+    validation_start: null
+
+  xianshi:
+    gtg_dir: ../data/xianshi
+    osm_poi: ../data/external_2026/xianshi/osm_poi_2026.geojson
+    osm_poi_layer: null
+    osm_roads: ../data/external_2026/xianshi/osm_roads_2026.geojson
+    osm_road_layer: null
+    population: ../data/external_2026/xianshi/population_2026.csv
+    osm_snapshot_date: 2026-08-21
+    population_year: 2026
+    validation_start: null

@@ -98,10 +98,16 @@ def train_diffusion(cfg):
     model = CRAFTModel(cfg).to(cfg['device'])
 
     optimizer = AdamW(params=model.parameters(), lr=cfg['lr'])
-    lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10, min_lr=0.05 * cfg['lr'])
+    use_source_validation = cfg.get('use_source_validation', True)
+    lr_scheduler = (
+        ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10, min_lr=0.05 * cfg['lr'])
+        if use_source_validation else None
+    )
     ema = EMA(model, beta=cfg['ema_decay'], update_every=cfg['update_every'])
     train_dataset_list = get_source_train_datasets(cfg, phase='train')
-    valid_dataset_list = get_source_train_datasets(cfg, phase='test')
+    valid_dataset_list = (
+        get_source_train_datasets(cfg, phase='test') if use_source_validation else None
+    )
 
     def train_epoch():
         model.train()
@@ -120,6 +126,8 @@ def train_diffusion(cfg):
         return mean_loss
 
     def valid_epoch():
+        if valid_dataset_list is None:
+            raise RuntimeError('严格模式: use_source_validation=False 时不得调用 valid_epoch')
         valid_model = ema.ema_model
         valid_model.eval()
         valid_loader = build_balanced_sample_dataloader(
@@ -134,29 +142,40 @@ def train_diffusion(cfg):
         mean_loss /= len(valid_loader)
         return mean_loss
 
-    stop_checker = EarlyStop(patience=30)
+    stop_checker = EarlyStop(patience=30) if use_source_validation else None
     min_valid_loss = math.inf
     diff_train_rcd = []
     for epoch in range(cfg['diff_train_epoch']):
         train_loss = train_epoch()
-        valid_loss = valid_epoch()
-        print(f'Epoch {epoch} train loss {train_loss:.4f} valid loss {valid_loss:.4f}')
-        # 记录损失
-        diff_train_rcd.append({
-            'epoch': epoch,
-            'train_loss': train_loss,
-            'valid_loss': valid_loss
-        })
+        valid_loss = valid_epoch() if use_source_validation else None
+        if use_source_validation:
+            print(f'Epoch {epoch} train loss {train_loss:.4f} valid loss {valid_loss:.4f}')
+            diff_train_rcd.append({
+                'epoch': epoch,
+                'train_loss': train_loss,
+                'valid_loss': valid_loss
+            })
+        else:
+            print(f'Epoch {epoch} train loss {train_loss:.4f} (source validation disabled)')
+            diff_train_rcd.append({'epoch': epoch, 'train_loss': train_loss})
         pd.DataFrame(data=diff_train_rcd).to_csv(join(exp_dir, f'craft_train_loss.csv'), index=False)
 
-        lr_scheduler.step(valid_loss)
-        if valid_loss < min_valid_loss:
-            min_valid_loss = valid_loss
+        if use_source_validation:
+            lr_scheduler.step(valid_loss)
+            if valid_loss < min_valid_loss:
+                min_valid_loss = valid_loss
+                torch.save({
+                    'ori_model': model.state_dict(),
+                    'ema_model': ema.ema_model.state_dict()
+                }, join(exp_dir, f'craft.pth'))
+        else:
+            # 无验证集时固定训练完整 epoch，并保存最后一个 EMA 状态；不以训练损失冒充验证指标。
             torch.save({
                 'ori_model': model.state_dict(),
                 'ema_model': ema.ema_model.state_dict()
             }, join(exp_dir, f'craft.pth'))
-        early_stop = stop_checker.update(valid_loss)
-        if epoch > 200 and early_stop:
-            print(f'Early stop at epoch {epoch}')
-            break
+        if use_source_validation:
+            early_stop = stop_checker.update(valid_loss)
+            if epoch > 200 and early_stop:
+                print(f'Early stop at epoch {epoch}')
+                break

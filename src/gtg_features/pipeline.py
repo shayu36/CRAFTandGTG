@@ -4,6 +4,7 @@
   road.csv --对偶图--> 空间句法(road级) + Metis分区池化 --长度加权--> region 级特征矩阵
 产出 (缓存原始/未归一化, 归一化在装配区域图时按训练城市统计执行, 防泄漏):
   cache/gtg/{city}_gtg_region.npz   : region_feat(N,K), feat_names
+  cache/gtg/{city}_gtg_road.npz     : road_feat(M,K), road_id, feat_names
   cache/gtg/{city}_gtg_meta.json    : 规模/覆盖/退化统计/参数
 """
 import json
@@ -36,7 +37,11 @@ def _read_utm_epsg(city_dir):
 
 def build_city(city, craft_root, cache_dir, local_size=50, verbose=True):
     city_dir = join(craft_root, city)
-    road_pth = join(city_dir, "road.csv")
+    # GTG 新城市的 road.csv 会混入仅用于 CRAFT 8 类静态统计的 OSM residential/
+    # living_street。拓扑特征必须优先使用原 GTG 有向路段转换出的 gtg_road.csv；
+    # 原 CRAFT 城市没有该文件，保持回退到 road.csv 的既有行为。
+    gtg_road_pth = join(city_dir, "gtg_road.csv")
+    road_pth = gtg_road_pth if os.path.exists(gtg_road_pth) else join(city_dir, "road.csv")
     region_pth = join(city_dir, "grid_region.csv")
     region_feat_pth = join(city_dir, "grid_region_feature.csv")
     for p in (road_pth, region_pth, region_feat_pth):
@@ -94,6 +99,15 @@ def build_city(city, craft_root, cache_dir, local_size=50, verbose=True):
         region_feat=region_feat.astype(np.float32),
         feat_names=np.array(feat_names),
     )
+    # 第二阶段需要保留真实 Road 节点。该缓存与 road.csv 行顺序/road_id 双重对齐，
+    # 不能用已经池化的 region_feat 逆推或冒充 Road 特征。
+    road_feat = np.stack([road_features[k] for k in FEATURE_ORDER], axis=1)
+    np.savez_compressed(
+        join(cache_dir, f"{city}_gtg_road.npz"),
+        road_feat=road_feat.astype(np.float32),
+        road_id=dg["road_id"],
+        feat_names=np.array(FEATURE_ORDER),
+    )
     meta = {
         "city": city,
         "utm_epsg": utm_epsg,
@@ -104,6 +118,8 @@ def build_city(city, craft_root, cache_dir, local_size=50, verbose=True):
         "local_size": local_size,
         "feature_names": feat_names,
         "feature_dim": len(feat_names),
+        "road_cache": f"{city}_gtg_road.npz",
+        "road_input": os.path.basename(road_pth),
         "space_syntax_meta": ss["meta"],
         "coverage": coverage,
         "region_feat_mean": {n: float(region_feat[:, i].mean()) for i, n in enumerate(feat_names)},

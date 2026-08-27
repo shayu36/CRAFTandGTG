@@ -87,3 +87,5 @@ python3 -m pytest test_model_integration.py test_data_loaders.py test_gtg_featur
 - 实现细节：[docs/STAGE1_IMPLEMENTATION.md](docs/STAGE1_IMPLEMENTATION.md)
 - 特征覆盖率：[docs/GTG_FEATURE_COVERAGE.md](docs/GTG_FEATURE_COVERAGE.md)
 - 测试报告：[docs/STAGE1_TEST_REPORT.md](docs/STAGE1_TEST_REPORT.md)
+- GTG 三城车辆边界流量与 OSM/WorldPop 2026 准备：
+  [docs/GTG_CRAFT_DATA_PREPROCESSING.md](docs/GTG_CRAFT_DATA_PREPROCESSING.md)

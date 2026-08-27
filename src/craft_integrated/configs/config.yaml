@@ -25,6 +25,7 @@ month_dim: 64
 use_retrieve: True
 retrieve_top_k: 5
 retrieve_metric: euclidean
+retrieve_match_month: false   # GTG 仅 11 月；跨城检索只匹配 weekday + start_hour
 use_self_reference: False
 
 # global training config
@@ -36,6 +37,7 @@ batch_size: 256
 lr: 0.5e-5
 ema_decay: 0.995
 update_every: 10
+use_source_validation: false  # GTG 全量训练，CRAFT 城市仅作最终测试
 
 use_sim_loss: True
 use_w_loss: True
@@ -49,3 +51,9 @@ use_month: False
 sample_num:
   train: 30000
   test: 10000
+
+# GTG 源城市静态数据目录；目录生成后由 data_loaders 覆盖默认 CRAFT 根。
+city_data_dirs:
+  beijing: /root/autodl-tmp/projects/Paper/data/gtg_craft/beijing
+  chengdushi: /root/autodl-tmp/projects/Paper/data/gtg_craft/chengdushi
+  xianshi: /root/autodl-tmp/projects/Paper/data/gtg_craft/xianshi

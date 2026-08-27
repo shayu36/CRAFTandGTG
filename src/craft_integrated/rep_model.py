@@ -4,7 +4,7 @@ import torch
 import random
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATv2Conv
+from pyg_compat import GATv2Conv
 from torch.autograd import Function
 
 from graph_transformer_pytorch import GraphTransformer
@@ -210,9 +210,15 @@ class GTAggregator(nn.Module):
         for graph in src_graphs:
             node_feature, edge_index = graph.x.to(self.device), graph.edge_index.to(self.device)
             reps = self.forward(node_feature, edge_index)
-            src_emb.append(reps)
-            value = graph.value.to(self.device)
-            src_value.append(value)
+            # 仅有正值训练窗口的区域参与流量-表征监督；完整区域图仍
+            # 参与 GNN 消息传播，不对无监督区域伪造零流量。
+            value_region_ids = getattr(graph, 'value_region_ids', None)
+            if value_region_ids is not None:
+                value_region_ids = value_region_ids.to(self.device)
+                src_emb.append(reps[value_region_ids])
+            else:
+                src_emb.append(reps)
+            src_value.append(graph.value.to(self.device))
         src_emb = torch.cat(src_emb, dim=0)
         src_value = torch.cat(src_value, dim=0)
 

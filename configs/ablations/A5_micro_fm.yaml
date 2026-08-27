@@ -1,0 +1,7 @@
+base_config: ../stage2_hierarchical_fm.yaml
+use_cross_state: false
+loss:
+  cross_state: 0.0
+training:
+  phase: joint_fm
+
