@@ -33,6 +33,8 @@ three_layer      新 Road→Syntax→Region 路径
 
 `three_layer` 与 `use_gtg_topology: true` 同时出现时直接报配置错误。三层模式下不读取旧 9 维 Region cache，不实例化旧 `GTGTopoBranch`。
 
+三层模式的 `GTAggregator.calc_loss()` 已按多 Source 协议分离 TFA/CCA：TFA 为每座 Source 城市内部计算并等权平均；CCA 使用所有 Source 的完整静态 Region，并将每座城市的 OT 总质量固定为 `1/S`，代价固定为 `1-cosine`。
+
 `src/craft_integrated/data_loaders.py` 增加了 `require_flow_labels` 边界：
 
 ```text

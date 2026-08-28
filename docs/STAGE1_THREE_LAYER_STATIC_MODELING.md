@@ -76,6 +76,16 @@ road_topo_x [M,4]
   → region_rep [N,rep_dim]
 ```
 
+## 多 Source 静态表征训练协议
+
+三层模式下，Source 城市的 TFA 和 CCA 使用不同的 Region 集合：
+
+- TFA 对每座 Source 单独取 `reps[value_region_ids]` 与对应动态 value，调用原有 `self_sim_loss`，再对 Source 城市的 loss 做等权平均；不会产生跨城市 TFA 两两配对。
+- CCA 使用每座 Source 的完整静态 `reps`，包括没有训练流量窗口的 Region。Source OT 边际为每个城市总质量 `1/S`，即城市 `c` 的每个 Region 质量为 `1/(S*N_c)`。
+- 三层模式的 CCA 代价固定为 `1-cosine`，由 `cca_metric: cosine` 显式声明；不复用 RAG 的 `retrieve_metric`。
+
+Target 仍只提供完整静态表征，Target OT 边际保持总质量为 1 的均匀分布，不读取 target `norm_train`。
+
 四个城市使用同一个 `ThreeLayerStaticEncoder` 参数实例。source 城市需要动态 Region value 供原 CRAFT TFA 使用；target 城市只加载静态三层图，不读取 train flow、不伪造零 value。
 
 ## 严格模式

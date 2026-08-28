@@ -36,6 +36,7 @@ target_city: null
 # 不新增任何三层或 GTG 专属损失。
 use_sim_loss: true
 use_w_loss: true
+cca_metric: cosine
 device: cpu
 pretrain_epoch: 1
 seed: 20260828

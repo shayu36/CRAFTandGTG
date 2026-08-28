@@ -72,23 +72,50 @@ def self_sim_loss(embeddings, values, metric='euclidean'):
     return loss
 
 
-def wasserstein_loss(src_emb, trg_emb, metric):
+def wasserstein_loss(src_emb, trg_emb, metric, src_marginals=None, trg_marginals=None):
     """
-    借助 POT 求解器计算 wassertein 损失 (精确计算)
+    借助 POT 求解器计算 Wasserstein 损失 (精确计算)。
+
+    ``src_marginals``/``trg_marginals`` 可显式指定 OT 边际；未提供时保持
+    原有的样本等质量行为。边际必须是有限、非负且总质量为 1，避免城市
+    Region 数量通过隐式样本质量改变 CCA 权重。
     """
-    wa = np.ones(len(src_emb)) / len(src_emb)
-    wb = np.ones(len(trg_emb)) / len(trg_emb)
+    if src_emb.ndim != 2 or trg_emb.ndim != 2 or len(src_emb) == 0 or len(trg_emb) == 0:
+        raise ValueError('严格模式: Wasserstein 输入必须为非空二维表征')
+    if not torch.isfinite(src_emb).all() or not torch.isfinite(trg_emb).all():
+        raise ValueError('严格模式: Wasserstein 输入含 NaN/Inf')
+
+    def _marginals(values, expected_len, name):
+        if values is None:
+            result = np.ones(expected_len, dtype=np.float64) / expected_len
+        else:
+            if isinstance(values, torch.Tensor):
+                values = values.detach().cpu().numpy()
+            result = np.asarray(values, dtype=np.float64)
+            if result.shape != (expected_len,):
+                raise ValueError(f'严格模式: {name} shape 错误，期望 [{expected_len}]')
+            if not np.isfinite(result).all() or (result < 0).any():
+                raise ValueError(f'严格模式: {name} 必须为有限非负值')
+            if not np.isclose(result.sum(), 1.0, atol=1e-6, rtol=1e-6):
+                raise ValueError(f'严格模式: {name} 总质量必须为 1，实得 {result.sum()}')
+        return result
+
+    wa = _marginals(src_marginals, len(src_emb), 'src_marginals')
+    wb = _marginals(trg_marginals, len(trg_emb), 'trg_marginals')
     if metric == 'euclidean':
         eps = 1e-8
         src_emb = src_emb / torch.clamp(torch.norm(src_emb, dim=-1, keepdim=True), min=eps)
         trg_emb = trg_emb / torch.clamp(torch.norm(trg_emb, dim=-1, keepdim=True), min=eps)
         dist = torch.cdist(src_emb, trg_emb, p=2)
         cost = dist.detach().cpu().numpy()
-    else:
-        assert metric == 'cosine'
+    elif metric == 'cosine':
         cosine_sim = calc_cosine_similarity_matrix(src_emb, trg_emb)
         dist = 1. - cosine_sim
         cost = dist.detach().cpu().numpy()
+    else:
+        raise ValueError(f'严格模式: 不支持的 Wasserstein metric={metric!r}')
+    if not np.isclose(wa.sum(), wb.sum(), atol=1e-6, rtol=1e-6):
+        raise ValueError('严格模式: Source/Target OT 边际总质量不一致')
     transition = ot.emd(a=wa, b=wb, M=cost)
     transition = torch.tensor(transition, dtype=torch.float32).to(src_emb.device)
     loss = torch.sum(transition * dist)
@@ -120,6 +147,12 @@ class GTAggregator(nn.Module):
         )
         if self.static_structure_mode not in {'craft_only', 'flat_gtg_region', 'three_layer'}:
             raise ValueError(f'未知 static_structure_mode={self.static_structure_mode!r}')
+        if self.static_structure_mode == 'three_layer':
+            self.cca_metric = cfg.get('cca_metric', 'cosine')
+            if self.cca_metric != 'cosine':
+                raise ValueError('three_layer 模式的 CCA metric 必须为 cosine (1-cosine cost)')
+        else:
+            self.cca_metric = self.retrieve_metric
         if self.static_structure_mode == 'three_layer':
             if cfg.get('use_gtg_topology', False):
                 raise ValueError('three_layer mode and flat GTG region fusion cannot be enabled together')
@@ -244,6 +277,9 @@ class GTAggregator(nn.Module):
         src_graphs = batch['src_graphs']
         trg_graphs = batch['trg_graphs']
 
+        if self.static_structure_mode == 'three_layer':
+            return self._calc_three_layer_loss(src_graphs, trg_graphs)
+
         src_emb, src_value = [], []
         # 源城市
         for graph in src_graphs:
@@ -284,6 +320,113 @@ class GTAggregator(nn.Module):
             'w_loss': w_loss.item(),
         }
         return total_loss, loss_items
+
+    def _calc_three_layer_loss(self, src_graphs, trg_graphs):
+        """三层模式的多 Source TFA/CCA 协议。
+
+        TFA 在每个 Source 城市内部、仅对有动态标签的 Region 计算，最后按
+        城市等权平均；CCA 使用每个 Source 城市的完整静态 Region 表征，且
+        每座城市的 OT 总质量固定为 ``1 / num_source_cities``。
+        """
+
+        if not src_graphs:
+            raise ValueError('严格模式: three_layer TFA/CCA 至少需要一个 Source 城市')
+        if not trg_graphs:
+            raise ValueError('严格模式: three_layer CCA 至少需要一个 Target 城市')
+
+        full_source_reps = []
+        source_marginals = []
+        city_tfa_losses = []
+        num_sources = len(src_graphs)
+
+        def _checked_reps(graph, role):
+            reps = self.encode_graph(graph)
+            city = getattr(graph, "city", role)
+            if not isinstance(reps, torch.Tensor):
+                raise TypeError(f'严格模式: {city} {role} 表征必须为 torch.Tensor')
+            if reps.ndim != 2 or reps.shape[0] == 0 or reps.shape[1] != self.rep_dim:
+                raise ValueError(
+                    f'严格模式: {city} {role} 表征 shape 错误，'
+                    f'期望 [N,{self.rep_dim}]，实得 {tuple(reps.shape)}'
+                )
+            if not torch.isfinite(reps).all():
+                raise ValueError(f'严格模式: {city} {role} 表征含 NaN/Inf')
+            return reps
+
+        for graph in src_graphs:
+            reps = _checked_reps(graph, "Source")
+            full_source_reps.append(reps)
+
+            value = getattr(graph, 'value', None)
+            value_region_ids = getattr(graph, 'value_region_ids', None)
+            if value is None or value_region_ids is None:
+                raise ValueError(
+                    f'严格模式: {getattr(graph, "city", "source")} 缺少 TFA 所需动态 Region value'
+                )
+            if not isinstance(value, torch.Tensor) or not value.is_floating_point():
+                raise TypeError(
+                    f'严格模式: {getattr(graph, "city", "source")} value 必须为浮点 torch.Tensor'
+                )
+            if not isinstance(value_region_ids, torch.Tensor):
+                raise TypeError(
+                    f'严格模式: {getattr(graph, "city", "source")} value_region_ids 必须为 torch.Tensor'
+                )
+            value_region_ids = value_region_ids.to(reps.device)
+            value = value.to(reps.device)
+            if value_region_ids.dtype != torch.long or value_region_ids.ndim != 1:
+                raise ValueError(f'严格模式: {getattr(graph, "city", "source")} value_region_ids dtype/shape 错误')
+            if (
+                value.ndim != 2 or value.shape[1] != 48
+                or value_region_ids.shape[0] != value.shape[0]
+                or not torch.isfinite(value).all()
+            ):
+                raise ValueError(
+                    f'严格模式: {getattr(graph, "city", "source")} value ID/标签 shape 不一致，'
+                    '期望 value 为 [num_active_regions,48]'
+                )
+            if value_region_ids.numel() == 0:
+                raise ValueError(f'严格模式: {getattr(graph, "city", "source")} 没有可用于 TFA 的 Region')
+            if int(value_region_ids.min()) < 0 or int(value_region_ids.max()) >= reps.shape[0]:
+                raise ValueError(f'严格模式: {getattr(graph, "city", "source")} value_region_ids 越界')
+            if torch.unique(value_region_ids).shape[0] != value_region_ids.shape[0]:
+                raise ValueError(f'严格模式: {getattr(graph, "city", "source")} value_region_ids 重复')
+            city_tfa = self_sim_loss(reps[value_region_ids], value)
+            if not torch.isfinite(city_tfa):
+                raise FloatingPointError(f'严格模式: {getattr(graph, "city", "source")} TFA loss 为 NaN/Inf')
+            city_tfa_losses.append(city_tfa)
+
+            city_mass = 1.0 / (num_sources * reps.shape[0])
+            source_marginals.append(torch.full(
+                (reps.shape[0],), city_mass, dtype=reps.dtype, device=reps.device
+            ))
+
+        full_source_rep = torch.cat(full_source_reps, dim=0)
+        source_marginal = torch.cat(source_marginals, dim=0)
+        sim_loss = torch.stack(city_tfa_losses).mean()
+
+        full_target_reps = []
+        for graph in trg_graphs:
+            full_target_reps.append(_checked_reps(graph, "Target"))
+        full_target_rep = torch.cat(full_target_reps, dim=0)
+
+        w_loss = wasserstein_loss(
+            full_source_rep,
+            full_target_rep,
+            metric=self.cca_metric,
+            src_marginals=source_marginal,
+        )
+
+        total_loss = torch.zeros((), dtype=sim_loss.dtype, device=sim_loss.device)
+        if self.use_sim_loss:
+            total_loss = total_loss + sim_loss
+        if self.use_w_loss:
+            total_loss = total_loss + w_loss
+        if not torch.isfinite(total_loss):
+            raise FloatingPointError('严格模式: three_layer TFA/CCA loss 为 NaN/Inf')
+        return total_loss, {
+            'sim_loss': sim_loss.item(),
+            'w_loss': w_loss.item(),
+        }
 
 
 class GTGTopoBranch(nn.Module):

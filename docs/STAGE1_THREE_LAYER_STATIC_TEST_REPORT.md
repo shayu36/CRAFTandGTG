@@ -30,6 +30,22 @@ pytest -q tests/test_static_hierarchy.py
 
 最终一轮结果：`15 passed, 4 warnings`，耗时约 `6.42s`。
 
+多 Source 训练协议专项测试：
+
+```bash
+pytest -q tests/test_stage1_training_protocol.py
+```
+
+最终补丁后的结果：`3 passed, 4 warnings`，覆盖 TFA 城市等权、CCA 完整 Source、每城 `1/S` OT 边际、`1-cosine` 代价和禁止 Euclidean 回退。
+
+最终补丁后的第一阶段专项合并执行：
+
+```bash
+pytest -q tests/test_static_hierarchy.py tests/test_stage1_training_protocol.py
+```
+
+结果：`18 passed, 4 warnings`。
+
 ## 真实四城入口验证
 
 验证命令：
