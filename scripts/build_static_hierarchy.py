@@ -45,8 +45,14 @@ def _load_config(path: Path) -> dict:
         raise ValueError("静态阶段配置必须 static_structure_mode: three_layer")
     if config.get("road_feature_mode", "topology_only") == "cospec":
         raise NotImplementedError("CoSpec road features are not implemented in Stage 1")
-    if config.get("road_feature_mode", "topology_only") != "topology_only":
-        raise ValueError("当前仅支持 road_feature_mode: topology_only")
+    road_mode = config.get("road_feature_mode", "topology_only")
+    if road_mode not in {"topology_only", "start_static"}:
+        raise ValueError("road_feature_mode 必须为 topology_only 或 start_static")
+    if road_mode == "start_static":
+        if int(config.get("road_feature_dim", 33)) != 33:
+            raise ValueError("严格模式: start_static road_feature_dim 必须为 33")
+        if config.get("maxspeed_unit", "km/h") != "km/h":
+            raise ValueError("严格模式: 当前 START 静态 Road 配置要求 maxspeed_unit: km/h")
     return config
 
 
@@ -98,6 +104,8 @@ def main() -> None:
             city, _city_root(config, city, craft_root), syntax_cache_dir=syntax_cache,
             local_size=int(config.get("metis_local_size", 50)),
             empty_region_error_ratio=float(config.get("empty_region_error_ratio", 0.2)),
+            road_feature_mode=config.get("road_feature_mode", "topology_only"),
+            maxspeed_unit=config.get("maxspeed_unit", "km/h"),
         )
         built[city] = hierarchy
         if args.action == "preprocess":

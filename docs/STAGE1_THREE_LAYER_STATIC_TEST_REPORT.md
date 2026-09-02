@@ -3,94 +3,114 @@
 ## 执行环境
 
 - 工作目录：`/root/autodl-tmp/projects/Paper`
-- Python：`3.10`
+- Python：`3.10.20`
+- PyTorch：`2.0.1+cu118`
 - 设备：`cpu`
-- 目标城市本次验证使用命令行显式传入的 `chi`；配置文件中的 `target_city` 仍为 `null`。
+- PyG 原生扩展存在 ABI warning，测试使用仓库 `pyg_compat` 后备实现。
 
-## 自动化回归测试
+## START Road v2 特征与缓存
 
-实际执行命令：
-
-```bash
-pytest -q tests/test_model_integration.py tests/test_data_loaders.py \
-  tests/test_gtg_features.py tests/test_norm_flow.py \
-  tests/test_gtg_preprocessing.py tests/test_population_strict.py \
-  tests/test_static_hierarchy.py
-```
-
-结果：`63 passed, 9 warnings`，耗时约 `165.40s`。该命令在最后一轮严格校验补丁之前执行；最后一轮只重新执行了下方的三层专项测试和语法检查。
-
-警告来自当前环境中 `torch-scatter`、`torch-cluster`、`torch-spline-conv`、`torch-sparse` 的 ABI 不匹配以及 `pyproj` 的弃用提示；仓库的 `pyg_compat` 后备实现使测试继续执行。警告不是测试失败。
-
-新增三层测试单独执行：
+实际执行的三座城市 v2 预处理命令为等价 Python 调用：
 
 ```bash
-pytest -q tests/test_static_hierarchy.py
+PYTHONPATH=src python - <<'PY'
+from static_hierarchy.preprocessing import build_city_static_hierarchy
+from static_hierarchy.data import save_city_static_hierarchy
+for city in ['beijing', 'chengdushi', 'xianshi']:
+    hierarchy = build_city_static_hierarchy(
+        city, 'data/gtg_craft', syntax_cache_dir='cache/gtg',
+        local_size=50, empty_region_error_ratio=0.2,
+        road_feature_mode='start_static', maxspeed_unit='km/h',
+    )
+    save_city_static_hierarchy(hierarchy, 'cache/static_hierarchy_start_v2')
+PY
 ```
 
-最终一轮结果：`15 passed, 4 warnings`，耗时约 `6.42s`。
+结果：三座城市均成功生成 `three-layer-start-road-v2` cache：
 
-多 Source 训练协议专项测试：
+| city | `region_x` | `road_x` | `syntax_x` | 空 Region 比例 |
+|---|---:|---:|---:|---:|
+| `beijing` | `[81,45]` | `[14685,33]` | `[293,5]` | 0 |
+| `chengdushi` | `[23,45]` | `[3514,33]` | `[70,5]` | 0 |
+| `xianshi` | `[26,45]` | `[4147,33]` | `[82,5]` | 0 |
+
+v2 metadata 记录完整 33 维列名、`maxspeed_unit: km/h`、`lanes/maxspeed` 缺失计数与比例。旧 `cache/static_hierarchy/` 未被覆盖。
+
+## v2 加载、前向和反向
+
+实际执行 CPU smoke 命令为：
 
 ```bash
-pytest -q tests/test_stage1_training_protocol.py
+PYTHONPATH=src:src/craft_integrated python - <<'PY'
+import torch
+from static_hierarchy.data import load_city_static_hierarchy
+from static_hierarchy.model import ThreeLayerStaticEncoder
+cfg = {
+    'static_structure_mode': 'three_layer', 'road_feature_mode': 'start_static',
+    'road_feature_dim': 33, 'rep_dim': 16, 'road_gat_layers': 1,
+    'road_gat_heads': 2, 'road_dropout': 0.0, 'syntax_gat_layers': 1,
+    'syntax_gat_heads': 2, 'syntax_dropout': 0.0,
+}
+model = ThreeLayerStaticEncoder(cfg).train()
+for city in ['beijing', 'chengdushi', 'xianshi']:
+    hierarchy = load_city_static_hierarchy(
+        'cache/static_hierarchy_start_v2', city,
+        expected_feature_version='three-layer-start-road-v2',
+    )
+    outputs = model(hierarchy, return_intermediates=True)
+    assert outputs['region_rep'].shape == (hierarchy.num_regions, 16)
+    assert all(torch.isfinite(value).all() for value in outputs.values())
+    model.zero_grad(set_to_none=True)
+    outputs['region_rep'].sum().backward()
+PY
 ```
 
-最终补丁后的结果：`3 passed, 4 warnings`，覆盖 TFA 城市等权、CCA 完整 Source、每城 `1/S` OT 边际、`1-cosine` 代价和禁止 Euclidean 回退。
+结果：三座城市的 `road_h`、`road_to_syntax_h`、`syntax_h`、`syntax_to_region_h`、`region_rep` shape 均正确且 finite；Road encoder、Syntax encoder、Region init、Region fusion 和 Region GraphTransformer 均获得非空有限梯度。三城共用同一个编码器实例。
 
-最终补丁后的第一阶段专项合并执行：
+## 自动化测试
+
+实际执行：
 
 ```bash
-pytest -q tests/test_static_hierarchy.py tests/test_stage1_training_protocol.py
+pytest -q tests/test_start_road_features.py tests/test_static_hierarchy.py tests/test_stage1_training_protocol.py
 ```
 
-结果：`18 passed, 4 warnings`。
+结果：`26 passed, 5 warnings`。
 
-## 真实四城入口验证
+覆盖内容包括：
 
-验证命令：
+- START Road `[M,33]` schema 与固定列顺序；
+- Road type、长度归一化、lanes/maxspeed unknown bucket；
+- `mph` 转 `km/h`；
+- 有向入度/出度在自环之前计算；
+- 非法 `road_type_id` 严格报错；
+- v1 cache 不会被当作 v2 读取；
+- 旧三层前向、跨层算子、target 不读取动态流量；
+- 多 Source TFA/CCA 等权协议与 cosine CCA。
+
+随后合并执行模型集成与 data loader 回归：
 
 ```bash
-python3 scripts/run_stage1_static.py \
-  --config configs/stage1_three_layer_static.yaml \
-  --action validate \
-  --source_cities beijing chengdushi xianshi \
-  --target_city chi
+pytest -q tests/test_start_road_features.py tests/test_static_hierarchy.py \
+  tests/test_stage1_training_protocol.py tests/test_model_integration.py \
+  tests/test_data_loaders.py
 ```
 
-结果：四城均通过严格构建与契约校验：
+结果：`43 passed, 6 warnings`。
 
-| city | regions | roads | syntax nodes |
-|---|---:|---:|---:|
-| `beijing` | 81 | 14685 | 293 |
-| `chengdushi` | 23 | 3514 | 70 |
-| `xianshi` | 26 | 4147 | 82 |
-| `chi` | 73 | 31093 | 621 |
-
-前向与梯度连通性命令：
+语法和空白检查：
 
 ```bash
-python3 scripts/run_stage1_static.py \
-  --config configs/stage1_three_layer_static.yaml \
-  --action smoke \
-  --source_cities beijing chengdushi xianshi \
-  --target_city chi
+python -m compileall -q src/static_hierarchy src/craft_integrated scripts/build_static_hierarchy.py scripts/run_stage1_static.py
+git diff --check
 ```
 
-结果：`beijing [81,128]`、`chengdushi [23,128]`、`xianshi [26,128]`、`chi [73,128]`，`grad_check: true`，输出全部 finite。
-
-原 CRAFT 静态表征机制的 1 epoch 实际执行：
-
-```bash
-python3 scripts/run_stage1_static.py \
-  --config configs/stage1_three_layer_static.yaml \
-  --action pretrain \
-  --source_cities beijing chengdushi xianshi \
-  --target_city chi
-```
-
-结果：命令正常结束并写入 `outputs/stage1_static/` 下四城 `*_region_rep.npy` 和 `static_encoder.pth`。这只是 1 epoch 的静态预训练验证，不代表完整研究训练收敛。
+结果：命令成功。
 
 ## 未运行项目
 
-本报告没有运行 `src/craft_integrated/retrieve.py`、`diffusion.py`、`unet.py`、`generate.py`、`src/hcfm/`、Flow Matching、RAG、Diffusion 训练/生成或 Stage 2 测试，也没有进行消融实验。
+本次没有运行 RAG/Retriever、Diffusion、Flow Matching、HCFM、Stage 2、生成流程或消融实验，也没有执行完整研究训练。
+
+## 环境限制
+
+当前环境的 `graph_tool` 存在 `libgomp` ABI 错误，无法用于缺失 GTG cache 的离线重算；本次三座城市均使用已存在且已对齐的 GTG Road cache，因此不影响 v2 预处理和测试。

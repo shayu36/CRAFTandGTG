@@ -1,11 +1,12 @@
 # 第一阶段三层城市静态图：Road → Spatial Syntax → CRAFT Region。
 # target_city 必须由命令行或本文件显式提供，不设置默认目标城市。
 static_structure_mode: three_layer
-road_feature_mode: topology_only
+road_feature_mode: start_static
+road_feature_dim: 33
+maxspeed_unit: km/h
 
 rep_dim: 128
 raw_feature_dim: 45
-road_topo_feature_dim: 4
 road_gat_layers: 4
 road_gat_heads: 8
 road_dropout: 0.1
@@ -19,7 +20,7 @@ empty_region_error_ratio: 0.2
 craft_data_root: ../CRAFT/cleared_data
 norm_flow_root: data/norm_flow
 gtg_syntax_cache_dir: cache/gtg
-static_hierarchy_cache_dir: cache/static_hierarchy
+static_hierarchy_cache_dir: cache/static_hierarchy_start_v2
 static_rep_output_dir: outputs/stage1_static
 city_data_dirs:
   beijing: data/gtg_craft/beijing

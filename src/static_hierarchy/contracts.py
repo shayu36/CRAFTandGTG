@@ -8,7 +8,7 @@ from typing import Any
 import torch
 
 
-@dataclass
+@dataclass(init=False)
 class CityStaticHierarchy:
     """稳定排序的 Road、Syntax、Region 三层城市静态图。
 
@@ -19,7 +19,10 @@ class CityStaticHierarchy:
     city_id: str
     region_x: torch.Tensor
     region_edge_index: torch.Tensor
-    road_topo_x: torch.Tensor
+    # ``road_x`` is the canonical storage.  ``road_topo_x`` remains a
+    # read-only compatibility property for the v1 topology-only cache and
+    # older callers.
+    road_x: torch.Tensor
     road_edge_index: torch.Tensor
     road_ids: tuple[str, ...]
     syntax_x: torch.Tensor
@@ -38,6 +41,65 @@ class CityStaticHierarchy:
     value_region_ids: torch.Tensor | None = None
     value_mask: torch.Tensor | None = None
 
+    def __init__(
+        self,
+        city_id: str,
+        region_x: torch.Tensor,
+        region_edge_index: torch.Tensor,
+        road_topo_x: torch.Tensor | None = None,
+        road_edge_index: torch.Tensor | None = None,
+        road_ids: tuple[str, ...] = (),
+        syntax_x: torch.Tensor | None = None,
+        syntax_edge_index: torch.Tensor | None = None,
+        road_to_syntax_assignment: torch.Tensor | None = None,
+        road_to_syntax_edge_index: torch.Tensor | None = None,
+        road_to_syntax_weight: torch.Tensor | None = None,
+        road_to_syntax_shape: tuple[int, int] = (0, 0),
+        syntax_to_region_edge_index: torch.Tensor | None = None,
+        syntax_to_region_weight: torch.Tensor | None = None,
+        syntax_to_region_shape: tuple[int, int] = (0, 0),
+        region_has_syntax: torch.Tensor | None = None,
+        metadata: dict[str, Any] | None = None,
+        value: torch.Tensor | None = None,
+        value_region_ids: torch.Tensor | None = None,
+        value_mask: torch.Tensor | None = None,
+        *,
+        road_x: torch.Tensor | None = None,
+    ) -> None:
+        if road_x is None:
+            road_x = road_topo_x
+        elif road_topo_x is not None and road_x is not road_topo_x:
+            if not torch.equal(road_x, road_topo_x):
+                raise ValueError("严格模式: road_x 与兼容参数 road_topo_x 不一致")
+        if road_x is None:
+            raise TypeError("严格模式: 必须提供 road_x（旧调用方可使用 road_topo_x）")
+        self.city_id = city_id
+        self.region_x = region_x
+        self.region_edge_index = region_edge_index
+        self.road_x = road_x
+        self.road_edge_index = road_edge_index
+        self.road_ids = tuple(str(value) for value in road_ids)
+        self.syntax_x = syntax_x
+        self.syntax_edge_index = syntax_edge_index
+        self.road_to_syntax_assignment = road_to_syntax_assignment
+        self.road_to_syntax_edge_index = road_to_syntax_edge_index
+        self.road_to_syntax_weight = road_to_syntax_weight
+        self.road_to_syntax_shape = tuple(int(value) for value in road_to_syntax_shape)
+        self.syntax_to_region_edge_index = syntax_to_region_edge_index
+        self.syntax_to_region_weight = syntax_to_region_weight
+        self.syntax_to_region_shape = tuple(int(value) for value in syntax_to_region_shape)
+        self.region_has_syntax = region_has_syntax
+        self.metadata = {} if metadata is None else metadata
+        self.value = value
+        self.value_region_ids = value_region_ids
+        self.value_mask = value_mask
+
+    @property
+    def road_topo_x(self) -> torch.Tensor:
+        """旧 v1 调用方兼容别名；对象内部只保存一份 ``road_x``。"""
+
+        return self.road_x
+
     @property
     def city(self) -> str:
         return self.city_id
@@ -48,7 +110,7 @@ class CityStaticHierarchy:
 
     @property
     def num_roads(self) -> int:
-        return int(self.road_topo_x.shape[0])
+        return int(self.road_x.shape[0])
 
     @property
     def num_syntax(self) -> int:
@@ -95,14 +157,28 @@ def validate_city_static_hierarchy(hierarchy: CityStaticHierarchy) -> None:
         raise ValueError("严格模式: city_id 不能为空")
     if not isinstance(hierarchy.metadata, dict):
         raise TypeError("严格模式: metadata 必须为 dict")
-    region_x, road_x, syntax_x = hierarchy.region_x, hierarchy.road_topo_x, hierarchy.syntax_x
-    for name, value in (("region_x", region_x), ("road_topo_x", road_x), ("syntax_x", syntax_x)):
+    region_x, road_x, syntax_x = hierarchy.region_x, hierarchy.road_x, hierarchy.syntax_x
+    for name, value in (("region_x", region_x), ("road_x", road_x), ("syntax_x", syntax_x)):
         if not isinstance(value, torch.Tensor):
             raise TypeError(f"严格模式: {name} 必须为 torch.Tensor")
     if region_x.ndim != 2 or region_x.shape[1] != 45:
         raise ValueError(f"严格模式: region_x 应为 [N,45]，实得 {tuple(region_x.shape)}")
-    if road_x.ndim != 2 or road_x.shape[1] != 4:
-        raise ValueError(f"严格模式: road_topo_x 应为 [M,4]，实得 {tuple(road_x.shape)}")
+    feature_version = hierarchy.metadata.get("feature_version")
+    road_feature_mode = hierarchy.metadata.get("road_feature_mode", "topology_only")
+    if feature_version == "three-layer-static-v1":
+        expected_road_dim = 4
+        if road_feature_mode != "topology_only":
+            raise ValueError("严格模式: v1 cache 的 road_feature_mode 必须为 topology_only")
+    elif feature_version == "three-layer-start-road-v2":
+        expected_road_dim = 33
+        if road_feature_mode != "start_static":
+            raise ValueError("严格模式: v2 cache 的 road_feature_mode 必须为 start_static")
+    else:
+        raise ValueError("严格模式: 缺少或错误的三层静态图 feature_version")
+    if road_x.ndim != 2 or road_x.shape[1] != expected_road_dim:
+        raise ValueError(
+            f"严格模式: road_x 应为 [M,{expected_road_dim}]，实得 {tuple(road_x.shape)}"
+        )
     if syntax_x.ndim != 2 or syntax_x.shape[1] != 5:
         raise ValueError(f"严格模式: syntax_x 应为 [K,5]，实得 {tuple(syntax_x.shape)}")
     if region_x.shape[0] <= 0:
@@ -111,7 +187,7 @@ def validate_city_static_hierarchy(hierarchy: CityStaticHierarchy) -> None:
         raise ValueError("严格模式: Road 图不能为空")
     if syntax_x.shape[0] <= 0:
         raise ValueError("严格模式: Syntax 图不能为空")
-    for name, value in (("region_x", region_x), ("road_topo_x", road_x), ("syntax_x", syntax_x)):
+    for name, value in (("region_x", region_x), ("road_x", road_x), ("syntax_x", syntax_x)):
         if not value.is_floating_point():
             raise ValueError(f"严格模式: {name} 必须为浮点 Tensor")
     if len(hierarchy.road_ids) != hierarchy.num_roads:
@@ -119,7 +195,7 @@ def validate_city_static_hierarchy(hierarchy: CityStaticHierarchy) -> None:
     if len(set(hierarchy.road_ids)) != len(hierarchy.road_ids):
         raise ValueError("严格模式: road_ids 存在重复 ID")
     for name, value in (
-        ("region_x", region_x), ("road_topo_x", road_x), ("syntax_x", syntax_x),
+        ("region_x", region_x), ("road_x", road_x), ("syntax_x", syntax_x),
         ("road_to_syntax_weight", hierarchy.road_to_syntax_weight),
         ("syntax_to_region_weight", hierarchy.syntax_to_region_weight),
     ):
@@ -177,9 +253,6 @@ def validate_city_static_hierarchy(hierarchy: CityStaticHierarchy) -> None:
         raise ValueError("严格模式: 非空 Region 的 Syntax→Region 权重和必须为 1")
     if (~nonempty).any() and (sums[~nonempty] != 0).any():
         raise ValueError("严格模式: region_has_syntax=False 的 Region 不应有映射边")
-    if hierarchy.metadata.get("feature_version") != "three-layer-static-v1":
-        raise ValueError("严格模式: 缺少或错误的三层静态图 feature_version")
-
     # Cache metadata is part of the contract as well.  Do not silently accept
     # arrays that disagree with the recorded city sizes or feature ordering.
     expected_counts = {
@@ -209,10 +282,28 @@ def validate_city_static_hierarchy(hierarchy: CityStaticHierarchy) -> None:
     ):
         if key in hierarchy.metadata and tuple(int(value) for value in hierarchy.metadata[key]) != expected_shape:
             raise ValueError(f"严格模式: metadata.{key} 与实际稀疏算子 shape 不一致")
-    if "road_topo_feature_names" in hierarchy.metadata and list(hierarchy.metadata["road_topo_feature_names"]) != [
-        "bias", "in_degree", "out_degree", "total_degree"
-    ]:
-        raise ValueError("严格模式: Road 拓扑特征顺序错误")
+    if feature_version == "three-layer-static-v1":
+        if "road_topo_feature_names" in hierarchy.metadata and list(hierarchy.metadata["road_topo_feature_names"]) != [
+            "bias", "in_degree", "out_degree", "total_degree"
+        ]:
+            raise ValueError("严格模式: Road 拓扑特征顺序错误")
+    else:
+        expected_start_names = [
+            "road_type_residential", "road_type_trunk", "road_type_primary", "road_type_secondary",
+            "road_type_tertiary", "road_type_motorway", "road_type_living_street", "road_type_unclassified",
+            "length_log_minmax",
+            "lanes_unknown", "lanes_1", "lanes_2", "lanes_3", "lanes_4", "lanes_5_plus",
+            "maxspeed_unknown", "maxspeed_le_30", "maxspeed_31_50", "maxspeed_51_70",
+            "maxspeed_71_90", "maxspeed_gt_90",
+            "indegree_0", "indegree_1", "indegree_2", "indegree_3", "indegree_4", "indegree_5_plus",
+            "outdegree_0", "outdegree_1", "outdegree_2", "outdegree_3", "outdegree_4", "outdegree_5_plus",
+        ]
+        if list(hierarchy.metadata.get("road_feature_names", [])) != expected_start_names:
+            raise ValueError("严格模式: START Road 特征顺序错误")
+        if int(hierarchy.metadata.get("road_feature_dim", -1)) != 33:
+            raise ValueError("严格模式: START Road feature_dim 必须为 33")
+        if hierarchy.metadata.get("maxspeed_unit") != "km/h":
+            raise ValueError("严格模式: START Road maxspeed_unit 必须明确为 km/h")
     if "syntax_feature_names" in hierarchy.metadata and list(hierarchy.metadata["syntax_feature_names"]) != [
         "connectivity", "total_depth", "integration", "choice", "mean_depth"
     ]:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ import torch
 
 from gtg_features.dual_graph import build_dual_graph
 from gtg_features.partition import metis_partition
+from gtg_preprocessing.contracts import ROAD_TYPES, ROAD_TYPE_TO_ID
 
 from .contracts import CityStaticHierarchy, validate_city_static_hierarchy
 from .operators import coalesce_edges, weighted_region_projection
@@ -26,6 +29,19 @@ CRAFT_FEATURE_ORDER = (
 )
 SYNTAX_FEATURE_ORDER = ["connectivity", "total_depth", "integration", "choice", "mean_depth"]
 ROAD_TOPO_FEATURE_ORDER = ["bias", "in_degree", "out_degree", "total_degree"]
+START_ROAD_FEATURE_ORDER = [
+    *[f"road_type_{name}" for name in ROAD_TYPES],
+    "length_log_minmax",
+    "lanes_unknown", "lanes_1", "lanes_2", "lanes_3", "lanes_4", "lanes_5_plus",
+    "maxspeed_unknown", "maxspeed_le_30", "maxspeed_31_50", "maxspeed_51_70",
+    "maxspeed_71_90", "maxspeed_gt_90",
+    "indegree_0", "indegree_1", "indegree_2", "indegree_3", "indegree_4", "indegree_5_plus",
+    "outdegree_0", "outdegree_1", "outdegree_2", "outdegree_3", "outdegree_4", "outdegree_5_plus",
+]
+LANES_BUCKET_ORDER = ["unknown", "1", "2", "3", "4", "5_plus"]
+MAXSPEED_BUCKET_ORDER = ["unknown", "le_30", "31_50", "51_70", "71_90", "gt_90"]
+DEGREE_BUCKET_ORDER = ["0", "1", "2", "3", "4", "5_plus"]
+_NUMERIC_PREFIX = re.compile(r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
 
 
 def _read_epsg(city_dir: Path) -> int:
@@ -146,6 +162,184 @@ def _road_topology_features(edge_index: np.ndarray, num_roads: int) -> np.ndarra
     return np.stack([np.ones(num_roads, dtype=np.float32), in_degree, out_degree, in_degree + out_degree], axis=1)
 
 
+def _numeric_prefix(value: object) -> float | None:
+    """解析道路属性的严格数值前缀；缺失/无法解析返回 None。"""
+
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null", "na", "n/a"}:
+        return None
+    match = _NUMERIC_PREFIX.match(text)
+    if match is None:
+        return None
+    number = float(match.group(1))
+    return number if np.isfinite(number) else None
+
+
+def _one_hot_bucket(value: int | None, buckets: list[str], prefix: str) -> tuple[np.ndarray, str]:
+    result = np.zeros(len(buckets), dtype=np.float32)
+    if value is None:
+        result[0] = 1.0
+        return result, "unknown"
+    if value >= 5:
+        bucket = "5_plus"
+    elif value in {0, 1, 2, 3, 4}:
+        bucket = str(value)
+    else:
+        bucket = "unknown"
+    result[buckets.index(bucket)] = 1.0
+    return result, bucket
+
+
+def _parse_lanes_bucket(value: object) -> str:
+    number = _numeric_prefix(value)
+    if number is None or number < 1 or not float(number).is_integer():
+        return "unknown"
+    integer = int(number)
+    return "5_plus" if integer >= 5 else str(integer)
+
+
+def _parse_maxspeed_kmh(value: object, unit: str) -> float | None:
+    """将数值/带单位限速统一为 km/h；无法解析返回 None。"""
+
+    if unit not in {"km/h", "m/s"}:
+        raise ValueError("严格模式: maxspeed_unit 只能为 'km/h' 或 'm/s'")
+    number = _numeric_prefix(value)
+    if number is None or number <= 0:
+        return None
+    text = str(value).strip().lower()
+    suffix = text[_NUMERIC_PREFIX.match(text).end():] if _NUMERIC_PREFIX.match(text) else ""
+    if "mph" in suffix:
+        return number * 1.609344
+    if "m/s" in suffix or "mps" in suffix:
+        return number * 3.6
+    if "km/h" in suffix or "kmh" in suffix or "kph" in suffix:
+        return number
+    # 纯数字遵循数据契约中的单位；没有明确单位的其他文本不猜测。
+    if not suffix.strip():
+        return number if unit == "km/h" else number * 3.6
+    return None
+
+
+def build_start_static_road_features(
+    road_df: pd.DataFrame,
+    edge_index: np.ndarray,
+    length_m: np.ndarray,
+    *,
+    maxspeed_unit: str = "km/h",
+) -> tuple[np.ndarray, dict[str, object]]:
+    """构造跨城市固定 33 维 START 风格静态 Road 特征。
+
+    Road 节点仍是稳定排序的有向 Road segment；``edge_index`` 只用于计算
+    原始有向对偶图的入度/出度，不能包含人为添加的 self-loop。
+    """
+
+    if maxspeed_unit not in {"km/h", "m/s"}:
+        raise ValueError("严格模式: maxspeed_unit 只能为 'km/h' 或 'm/s'")
+    n = len(road_df)
+    if n <= 0:
+        raise ValueError("严格模式: Road 文件不能为空")
+    lengths = np.asarray(length_m, dtype=np.float64)
+    if lengths.shape != (n,) or not np.isfinite(lengths).all() or (lengths <= 0).any():
+        raise ValueError("严格模式: START Road length_m 必须为有限正值 [M]")
+    edge_index = np.asarray(edge_index, dtype=np.int64)
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("严格模式: START Road edge_index 必须为 [2,E]")
+    if edge_index.size and (edge_index.min() < 0 or edge_index.max() >= n):
+        raise ValueError("严格模式: START Road edge_index 越界")
+    required = {"road_type_id", "lanes", "maxspeed"}
+    missing = sorted(required - set(road_df.columns))
+    if missing:
+        raise ValueError(f"严格模式: START Road 文件缺少列 {missing}")
+
+    type_values = pd.to_numeric(road_df["road_type_id"], errors="coerce").to_numpy(dtype=np.float64)
+    if not np.isfinite(type_values).all() or not np.equal(type_values, np.floor(type_values)).all():
+        raise ValueError("严格模式: road_type_id 必须为有限整数")
+    type_ids = type_values.astype(np.int64)
+    if len(ROAD_TYPES) != 8 or len(ROAD_TYPE_TO_ID) != 8:
+        raise ValueError("严格模式: 项目 ROAD_TYPES 必须保持固定 8 类 schema")
+    if (type_ids < 0).any() or (type_ids >= len(ROAD_TYPES)).any():
+        raise ValueError("严格模式: road_type_id 越界，必须属于 0..7")
+    type_one_hot = np.eye(len(ROAD_TYPES), dtype=np.float32)[type_ids]
+
+    length_log = np.log1p(lengths)
+    lo, hi = float(length_log.min()), float(length_log.max())
+    if hi == lo:
+        length_scaled = np.zeros(n, dtype=np.float32)
+        warnings.warn("START Road 所有道路长度相同，length_log_minmax 全部为 0", RuntimeWarning)
+        length_constant = True
+    else:
+        length_scaled = ((length_log - lo) / (hi - lo)).astype(np.float32)
+        length_constant = False
+
+    lanes_buckets = [_parse_lanes_bucket(value) for value in road_df["lanes"].tolist()]
+    lanes_one_hot = np.zeros((n, 6), dtype=np.float32)
+    for idx, bucket in enumerate(lanes_buckets):
+        lanes_one_hot[idx, LANES_BUCKET_ORDER.index(bucket)] = 1.0
+
+    speed_values = [_parse_maxspeed_kmh(value, maxspeed_unit) for value in road_df["maxspeed"].tolist()]
+    speed_buckets = []
+    for value in speed_values:
+        if value is None:
+            speed_buckets.append("unknown")
+        elif value <= 30:
+            speed_buckets.append("le_30")
+        elif value <= 50:
+            speed_buckets.append("31_50")
+        elif value <= 70:
+            speed_buckets.append("51_70")
+        elif value <= 90:
+            speed_buckets.append("71_90")
+        else:
+            speed_buckets.append("gt_90")
+    speed_one_hot = np.zeros((n, 6), dtype=np.float32)
+    for idx, bucket in enumerate(speed_buckets):
+        speed_one_hot[idx, MAXSPEED_BUCKET_ORDER.index(bucket)] = 1.0
+
+    out_degree = np.bincount(edge_index[0], minlength=n)
+    in_degree = np.bincount(edge_index[1], minlength=n)
+    degree_one_hot = np.zeros((n, 6), dtype=np.float32)
+    out_degree_one_hot = np.zeros((n, 6), dtype=np.float32)
+    for idx, degree in enumerate(in_degree.tolist()):
+        degree_one_hot[idx, DEGREE_BUCKET_ORDER.index("5_plus" if degree >= 5 else str(degree))] = 1.0
+    for idx, degree in enumerate(out_degree.tolist()):
+        out_degree_one_hot[idx, DEGREE_BUCKET_ORDER.index("5_plus" if degree >= 5 else str(degree))] = 1.0
+
+    road_x = np.concatenate(
+        [type_one_hot, length_scaled[:, None], lanes_one_hot, speed_one_hot,
+         degree_one_hot, out_degree_one_hot], axis=1
+    ).astype(np.float32)
+    if road_x.shape != (n, 33) or not np.isfinite(road_x).all():
+        raise ValueError("严格模式: START Road 特征必须为有限 [M,33]")
+    metadata = {
+        "road_feature_names": list(START_ROAD_FEATURE_ORDER),
+        "road_feature_dim": 33,
+        "road_feature_mode": "start_static",
+        "road_feature_rules": {
+            "road_type": "ROAD_TYPES/ROAD_TYPE_TO_ID fixed 8-class one-hot",
+            "length": "log1p(projected_length_m), city-local min-max [0,1]",
+            "lanes": "numeric prefix; unknown/1/2/3/4/5_plus",
+            "maxspeed": "km/h buckets; explicit mph/m/s suffix conversion; unitless values use maxspeed_unit",
+            "degree": "directed dual-graph in/out degree before self-loops, 0/1/2/3/4/5_plus",
+        },
+        "road_type_order": list(ROAD_TYPES),
+        "lanes_bucket_order": list(LANES_BUCKET_ORDER),
+        "maxspeed_bucket_order": list(MAXSPEED_BUCKET_ORDER),
+        "indegree_bucket_order": list(DEGREE_BUCKET_ORDER),
+        "outdegree_bucket_order": list(DEGREE_BUCKET_ORDER),
+        "maxspeed_unit": maxspeed_unit,
+        "missing_lanes_count": int(sum(bucket == "unknown" for bucket in lanes_buckets)),
+        "missing_lanes_ratio": float(sum(bucket == "unknown" for bucket in lanes_buckets) / n),
+        "missing_maxspeed_count": int(sum(bucket == "unknown" for bucket in speed_buckets)),
+        "missing_maxspeed_ratio": float(sum(bucket == "unknown" for bucket in speed_buckets) / n),
+        "length_log_min": lo,
+        "length_log_max": hi,
+        "length_constant": length_constant,
+    }
+    return road_x, metadata
+
+
 def _road_intersection_matrix(geom_utm, regions: pd.DataFrame, epsg: int) -> np.ndarray:
     import geopandas as gpd
     from shapely import wkt
@@ -178,6 +372,8 @@ def build_city_static_hierarchy(
     syntax_cache_dir: str | Path | None = None,
     local_size: int = 50,
     empty_region_error_ratio: float = 0.2,
+    road_feature_mode: str = "topology_only",
+    maxspeed_unit: str = "km/h",
 ) -> CityStaticHierarchy:
     """构建一个城市的三层静态图，所有排序均沿 CSV/Metis 输出固定。"""
 
@@ -187,6 +383,10 @@ def build_city_static_hierarchy(
         raise ValueError("严格模式: local_size 必须 > 0")
     if not 0 <= empty_region_error_ratio <= 1:
         raise ValueError("严格模式: empty_region_error_ratio 必须在 [0,1]")
+    if road_feature_mode == "cospec":
+        raise NotImplementedError("CoSpec road features are not implemented in Stage 1")
+    if road_feature_mode not in {"topology_only", "start_static"}:
+        raise ValueError(f"未知 road_feature_mode={road_feature_mode!r}")
     city_dir = Path(craft_root) / city
     if not city_dir.exists():
         raise FileNotFoundError(f"严格模式: 缺失城市目录 {city_dir}")
@@ -218,7 +418,18 @@ def build_city_static_hierarchy(
     if not np.array_equal(np.asarray([str(v) for v in dual["road_id"]]), np.asarray(road_ids)):
         raise ValueError("严格模式: dual graph Road 顺序未保持 CSV 顺序")
     road_edge_index = torch.from_numpy(dual["edge_index"]).long()
-    road_topo_x = torch.from_numpy(_road_topology_features(dual["edge_index"], len(road_df)))
+    if road_feature_mode == "topology_only":
+        road_x_np = _road_topology_features(dual["edge_index"], len(road_df))
+        road_feature_metadata = {
+            "feature_version": "three-layer-static-v1",
+            "road_topo_feature_names": ROAD_TOPO_FEATURE_ORDER,
+            "road_feature_mode": "topology_only",
+            "road_feature_dim": 4,
+        }
+    else:
+        road_x_np, road_feature_metadata = build_start_static_road_features(
+            road_df, dual["edge_index"], dual["length_m"], maxspeed_unit=maxspeed_unit
+        )
     assignment_np, num_syntax = metis_partition(len(road_df), dual["edge_index"], local_size=local_size)
     assignment_np = np.asarray(assignment_np, dtype=np.int64)
     if assignment_np.shape != (len(road_df),) or assignment_np.min() < 0 or assignment_np.max() >= num_syntax:
@@ -251,7 +462,7 @@ def build_city_static_hierarchy(
     rs_edge = torch.from_numpy(np.asarray([assignment_np, np.arange(len(road_df))], dtype=np.int64))
     rs_weight = torch.from_numpy((1.0 / counts[assignment_np]).astype(np.float32))
     metadata = {
-        "feature_version": "three-layer-static-v1",
+        "feature_version": "three-layer-static-v1" if road_feature_mode == "topology_only" else "three-layer-start-road-v2",
         "city": city,
         "num_regions": num_regions,
         "num_roads": len(road_df),
@@ -260,7 +471,6 @@ def build_city_static_hierarchy(
         "num_syntax_edges": int(syntax_edge_index.shape[1]),
         "num_road_to_syntax_links": len(road_df),
         "num_syntax_to_region_links": int(sr_edge.shape[1]),
-        "road_topo_feature_names": ROAD_TOPO_FEATURE_ORDER,
         "syntax_feature_names": SYNTAX_FEATURE_ORDER,
         "region_feature_order": list(CRAFT_FEATURE_ORDER),
         "empty_region_ids": torch.where(~region_has_syntax)[0].tolist(),
@@ -270,10 +480,11 @@ def build_city_static_hierarchy(
         "local_size": int(local_size),
         "syntax_edge_weight": syntax_weight_np.astype(np.float32).tolist(),
     }
+    metadata.update(road_feature_metadata)
     result = CityStaticHierarchy(
         city_id=city,
         region_x=torch.from_numpy(region_x), region_edge_index=region_edge_index,
-        road_topo_x=road_topo_x, road_edge_index=road_edge_index, road_ids=road_ids,
+        road_x=torch.from_numpy(road_x_np), road_edge_index=road_edge_index, road_ids=road_ids,
         syntax_x=torch.from_numpy(syntax_x), syntax_edge_index=syntax_edge_index,
         road_to_syntax_assignment=torch.from_numpy(assignment_np),
         road_to_syntax_edge_index=rs_edge, road_to_syntax_weight=rs_weight,

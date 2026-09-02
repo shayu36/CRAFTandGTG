@@ -8,18 +8,20 @@
 | `src/static_hierarchy/operators.py` | 稀疏算子、边 coalesce、Syntax→Region 几何映射 |
 | `src/static_hierarchy/preprocessing.py` | 从 Road/Region CSV 与既有 GTG Road cache 构建三层图 |
 | `src/static_hierarchy/data.py` | 独立 NPZ/JSON cache 保存与加载 |
-| `src/static_hierarchy/model.py` | Road、Syntax、Region 三层编码器 |
+| `src/static_hierarchy/model.py` | START `RoadStaticEncoder`、兼容 v1 `RoadTopologyEncoder`、Syntax、Region 三层编码器 |
 | `src/static_hierarchy/__init__.py` | 公共 API |
 | `configs/stage1_three_layer_static.yaml` | 静态阶段配置，target 不设默认值 |
 | `scripts/build_static_hierarchy.py` | `validate/preprocess/smoke/pretrain` 实现入口 |
 | `scripts/run_stage1_static.py` | 面向用户的第一阶段静态入口包装 |
 
-旧的 `cache/gtg/{city}_gtg_region.npz`、`{city}_gtg_road.npz` 和旧 `GTAggregator` 路径均保留。新缓存写入：
+旧的 `cache/gtg/{city}_gtg_region.npz`、`{city}_gtg_road.npz`、v1 三层 cache 和旧 `GTAggregator` 路径均保留。START v2 新缓存写入独立目录：
 
 ```text
-cache/static_hierarchy/{city}_static_hierarchy.npz
-cache/static_hierarchy/{city}_static_hierarchy_meta.json
+cache/static_hierarchy_start_v2/{city}_static_hierarchy.npz
+cache/static_hierarchy_start_v2/{city}_static_hierarchy_meta.json
 ```
+
+v2 cache 的 Road 真值字段为 `road_x[M,33]`，版本为 `three-layer-start-road-v2`；旧 v1 cache 的 `road_topo_x[M,4]` 只在 `topology_only` 兼容模式中读取，加载器会拒绝版本错配。
 
 ## 模式路由
 
@@ -32,6 +34,8 @@ three_layer      新 Road→Syntax→Region 路径
 ```
 
 `three_layer` 与 `use_gtg_topology: true` 同时出现时直接报配置错误。三层模式下不读取旧 9 维 Region cache，不实例化旧 `GTGTopoBranch`。
+
+正式配置使用 `road_feature_mode: start_static`。Road 33 维由固定 8 类 Road type、单城市米制长度 `log1p`-min-max、6 类 `lanes`、6 类 `maxspeed`、6 类有向入度和 6 类有向出度组成。无属性道路进入显式 `unknown`；不使用 CoSpec 或 START `trans_prob`。当前三座城市无单位纯数字速度按已确认的 `km/h` 解释。
 
 三层模式的 `GTAggregator.calc_loss()` 已按多 Source 协议分离 TFA/CCA：TFA 为每座 Source 城市内部计算并等权平均；CCA 使用所有 Source 的完整静态 Region，并将每座城市的 OT 总质量固定为 `1/S`，代价固定为 `1-cosine`。
 

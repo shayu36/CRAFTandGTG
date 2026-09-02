@@ -13,10 +13,9 @@ from .contracts import CityStaticHierarchy, validate_city_static_hierarchy
 
 
 def _array(hierarchy: CityStaticHierarchy) -> dict[str, np.ndarray]:
-    return {
+    arrays = {
         "region_x": hierarchy.region_x.cpu().numpy(),
         "region_edge_index": hierarchy.region_edge_index.cpu().numpy(),
-        "road_topo_x": hierarchy.road_topo_x.cpu().numpy(),
         "road_edge_index": hierarchy.road_edge_index.cpu().numpy(),
         "road_ids": np.asarray(hierarchy.road_ids, dtype=str),
         "syntax_x": hierarchy.syntax_x.cpu().numpy(),
@@ -30,6 +29,11 @@ def _array(hierarchy: CityStaticHierarchy) -> dict[str, np.ndarray]:
         "syntax_to_region_shape": np.asarray(hierarchy.syntax_to_region_shape, dtype=np.int64),
         "region_has_syntax": hierarchy.region_has_syntax.cpu().numpy(),
     }
+    if hierarchy.metadata.get("feature_version") == "three-layer-start-road-v2":
+        arrays["road_x"] = hierarchy.road_x.cpu().numpy()
+    else:
+        arrays["road_topo_x"] = hierarchy.road_x.cpu().numpy()
+    return arrays
 
 
 def save_city_static_hierarchy(
@@ -59,7 +63,12 @@ def _required(data: Any, keys: tuple[str, ...], path: Path) -> None:
         raise KeyError(f"严格模式: 三层静态 cache 缺少字段 {missing}: {path}")
 
 
-def load_city_static_hierarchy(cache_dir: str | Path, city: str) -> CityStaticHierarchy:
+def load_city_static_hierarchy(
+    cache_dir: str | Path,
+    city: str,
+    *,
+    expected_feature_version: str | None = None,
+) -> CityStaticHierarchy:
     cache_dir = Path(cache_dir)
     npz_path = cache_dir / f"{city}_static_hierarchy.npz"
     meta_path = cache_dir / f"{city}_static_hierarchy_meta.json"
@@ -67,7 +76,7 @@ def load_city_static_hierarchy(cache_dir: str | Path, city: str) -> CityStaticHi
         raise FileNotFoundError(f"严格模式: 缺少三层静态 cache: {npz_path} / {meta_path}")
     data = np.load(npz_path, allow_pickle=False)
     keys = (
-        "region_x", "region_edge_index", "road_topo_x", "road_edge_index", "road_ids",
+        "region_x", "region_edge_index", "road_edge_index", "road_ids",
         "syntax_x", "syntax_edge_index", "road_to_syntax_assignment",
         "road_to_syntax_edge_index", "road_to_syntax_weight", "road_to_syntax_shape",
         "syntax_to_region_edge_index", "syntax_to_region_weight", "syntax_to_region_shape",
@@ -75,23 +84,36 @@ def load_city_static_hierarchy(cache_dir: str | Path, city: str) -> CityStaticHi
     )
     _required(data, keys, npz_path)
     meta = json.loads(meta_path.read_text())
+    feature_version = meta.get("feature_version")
+    if expected_feature_version is not None and feature_version != expected_feature_version:
+        raise ValueError(
+            f"严格模式: cache feature_version={feature_version!r}，"
+            f"期望 {expected_feature_version!r}: {meta_path}"
+        )
+    road_key = "road_x" if feature_version == "three-layer-start-road-v2" else "road_topo_x"
+    _required(data, (road_key,), npz_path)
     required_meta = (
         "city", "num_regions", "num_roads", "num_road_edges", "num_syntax_nodes",
         "num_syntax_edges", "num_road_to_syntax_links", "num_syntax_to_region_links",
-        "road_ids", "road_topo_feature_names", "syntax_feature_names", "region_feature_order", "empty_region_ids",
+        "road_ids", "syntax_feature_names", "region_feature_order", "empty_region_ids",
         "empty_region_ratio", "utm_epsg", "source_road_file", "local_size",
         "feature_version", "road_to_syntax_shape", "syntax_to_region_shape",
     )
     missing_meta = [key for key in required_meta if key not in meta]
     if missing_meta:
         raise KeyError(f"严格模式: 三层静态 cache metadata 缺少字段 {missing_meta}: {meta_path}")
-    if meta.get("city") != city or meta.get("feature_version") != "three-layer-static-v1":
+    if meta.get("city") != city or feature_version not in {
+        "three-layer-static-v1", "three-layer-start-road-v2"
+    }:
         raise ValueError("严格模式: 三层静态 cache metadata city/feature_version 不一致")
+    road_meta_key = "road_feature_names" if feature_version == "three-layer-start-road-v2" else "road_topo_feature_names"
+    if road_meta_key not in meta:
+        raise KeyError(f"严格模式: 三层静态 cache metadata 缺少字段 [{road_meta_key}]: {meta_path}")
     hierarchy = CityStaticHierarchy(
         city_id=city,
         region_x=torch.from_numpy(data["region_x"]).float(),
         region_edge_index=torch.from_numpy(data["region_edge_index"]).long(),
-        road_topo_x=torch.from_numpy(data["road_topo_x"]).float(),
+        road_x=torch.from_numpy(data[road_key]).float(),
         road_edge_index=torch.from_numpy(data["road_edge_index"]).long(),
         road_ids=tuple(str(value) for value in data["road_ids"].tolist()),
         syntax_x=torch.from_numpy(data["syntax_x"]).float(),

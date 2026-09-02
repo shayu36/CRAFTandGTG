@@ -29,6 +29,7 @@ _GTG_FEATURE_DIM = None                 # 期望的 GTG 特征维度 (严格校�
 _CITY_DATA_DIRS = {}                    # 可选: {city: 该城市静态 CSV 目录}
 _STATIC_STRUCTURE_MODE = 'craft_only'   # craft_only / flat_gtg_region / three_layer
 _STATIC_HIERARCHY_CACHE_DIR = None
+_STATIC_HIERARCHY_FEATURE_VERSION = 'three-layer-static-v1'
 _EMPTY_REGION_ERROR_RATIO = 0.2
 _ROAD_FEATURE_MODE = 'topology_only'
 
@@ -37,6 +38,7 @@ def configure(cfg):
     """从配置注入数据路径与 GTG 融合开关 (只读 CRAFT, 归一化/缓存写在 Paper)。"""
     global _CRAFT_DATA_ROOT, _NORM_FLOW_ROOT, _USE_GTG_TOPOLOGY, _GTG_CACHE_DIR, _GTG_FEATURE_DIM
     global _CITY_DATA_DIRS, _STATIC_STRUCTURE_MODE, _STATIC_HIERARCHY_CACHE_DIR
+    global _STATIC_HIERARCHY_FEATURE_VERSION
     global _EMPTY_REGION_ERROR_RATIO, _ROAD_FEATURE_MODE
     _CRAFT_DATA_ROOT = cfg.get('craft_data_root', 'cleared_data')
     _NORM_FLOW_ROOT = cfg.get('norm_flow_root', None)
@@ -50,6 +52,7 @@ def configure(cfg):
     if _STATIC_STRUCTURE_MODE == 'three_layer' and _USE_GTG_TOPOLOGY:
         raise ValueError('three_layer mode and flat GTG region fusion cannot be enabled together')
     _STATIC_HIERARCHY_CACHE_DIR = cfg.get('static_hierarchy_cache_dir', None)
+    _STATIC_HIERARCHY_FEATURE_VERSION = 'three-layer-static-v1'
     if _STATIC_STRUCTURE_MODE == 'three_layer' and _STATIC_HIERARCHY_CACHE_DIR is None:
         raise ValueError('严格模式: three_layer 模式必须提供 static_hierarchy_cache_dir')
     _EMPTY_REGION_ERROR_RATIO = float(cfg.get('empty_region_error_ratio', 0.2))
@@ -58,8 +61,17 @@ def configure(cfg):
     _ROAD_FEATURE_MODE = cfg.get('road_feature_mode', 'topology_only')
     if _ROAD_FEATURE_MODE == 'cospec':
         raise NotImplementedError('CoSpec road features are not implemented in Stage 1')
-    if _ROAD_FEATURE_MODE != 'topology_only':
+    if _ROAD_FEATURE_MODE not in {'topology_only', 'start_static'}:
         raise ValueError(f'未知 road_feature_mode={_ROAD_FEATURE_MODE!r}')
+    if _STATIC_STRUCTURE_MODE == 'three_layer':
+        if _ROAD_FEATURE_MODE == 'start_static':
+            if int(cfg.get('road_feature_dim', 33)) != 33:
+                raise ValueError('严格模式: start_static road_feature_dim 必须为 33')
+            if cfg.get('maxspeed_unit', 'km/h') != 'km/h':
+                raise ValueError('严格模式: 第一阶段正式 START 配置的 maxspeed_unit 必须为 km/h')
+            _STATIC_HIERARCHY_FEATURE_VERSION = 'three-layer-start-road-v2'
+        else:
+            _STATIC_HIERARCHY_FEATURE_VERSION = 'three-layer-static-v1'
     if not isinstance(_CITY_DATA_DIRS, dict):
         raise ValueError('严格模式: city_data_dirs 必须是 {city: city_dir} mapping')
     if _USE_GTG_TOPOLOGY and _GTG_CACHE_DIR is None:
@@ -370,7 +382,11 @@ def load_region_feature(city, feature_cols=None):
 def _load_three_layer_region_graph(city, require_flow_labels=True):
     if _STATIC_HIERARCHY_CACHE_DIR is None:
         raise ValueError('严格模式: three_layer 模式未配置 static_hierarchy_cache_dir')
-    hierarchy = load_city_static_hierarchy(_STATIC_HIERARCHY_CACHE_DIR, city)
+    hierarchy = load_city_static_hierarchy(
+        _STATIC_HIERARCHY_CACHE_DIR,
+        city,
+        expected_feature_version=_STATIC_HIERARCHY_FEATURE_VERSION,
+    )
     empty_ratio = float(hierarchy.metadata['empty_region_ratio'])
     if empty_ratio > _EMPTY_REGION_ERROR_RATIO:
         raise ValueError(

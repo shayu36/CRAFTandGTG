@@ -48,14 +48,17 @@ def _standardize(value: torch.Tensor) -> torch.Tensor:
 
 
 class _GATStack(nn.Module):
-    def __init__(self, dim: int, layers: int, heads: int, dropout: float):
+    def __init__(self, dim: int, layers: int, heads: int, dropout: float, *, add_self_loops: bool = True):
         super().__init__()
         if dim < 1 or layers < 1 or heads < 1:
             raise ValueError("GAT 维度、层数和 heads 必须为正")
         if not 0 <= dropout <= 1:
             raise ValueError("GAT dropout 必须在 [0,1]")
         self.layers = nn.ModuleList([
-            GATv2Conv(dim, dim, heads=heads, concat=False, dropout=dropout)
+            GATv2Conv(
+                dim, dim, heads=heads, concat=False, dropout=dropout,
+                add_self_loops=add_self_loops,
+            )
             for _ in range(layers)
         ])
 
@@ -81,6 +84,28 @@ class RoadTopologyEncoder(nn.Module):
         if road_topo_x.ndim != 2 or road_topo_x.shape[1] != 4:
             raise ValueError(f"严格模式: road_topo_x 应为 [M,4]，实得 {tuple(road_topo_x.shape)}")
         h = self.input_proj(_standardize(road_topo_x))
+        return self.gnn_layers(h, road_edge_index)
+
+
+class RoadStaticEncoder(nn.Module):
+    """START 风格静态 Road 编码器，输入固定 33 维、保持有向边。"""
+
+    input_dim = 33
+
+    def __init__(self, rep_dim: int, layers: int, heads: int, dropout: float):
+        super().__init__()
+        self.input_proj = nn.Linear(self.input_dim, rep_dim)
+        self.input_norm = nn.LayerNorm(rep_dim)
+        self.gnn_layers = _GATStack(
+            rep_dim, layers, heads, dropout, add_self_loops=True
+        )
+
+    def forward(self, road_x: torch.Tensor, road_edge_index: torch.Tensor) -> torch.Tensor:
+        if road_x.ndim != 2 or road_x.shape[1] != self.input_dim:
+            raise ValueError(f"严格模式: road_x 应为 [M,33]，实得 {tuple(road_x.shape)}")
+        if not road_x.is_floating_point() or not torch.isfinite(road_x).all():
+            raise ValueError("严格模式: START Road 输入必须为有限浮点 Tensor")
+        h = torch.relu(self.input_norm(self.input_proj(road_x)))
         return self.gnn_layers(h, road_edge_index)
 
 
@@ -121,19 +146,23 @@ class ThreeLayerStaticEncoder(nn.Module):
         road_feature_mode = cfg.get("road_feature_mode", "topology_only")
         if road_feature_mode == "cospec":
             raise NotImplementedError("CoSpec road features are not implemented in Stage 1")
-        if road_feature_mode != "topology_only":
+        if road_feature_mode not in {"topology_only", "start_static"}:
             raise ValueError(f"未知 road_feature_mode={road_feature_mode!r}")
         self.rep_dim = int(cfg.get("rep_dim", 128))
         if self.rep_dim <= 0:
             raise ValueError("严格模式: rep_dim 必须为正")
-        if int(cfg.get("road_topo_feature_dim", 4)) != 4:
+        if road_feature_mode == "topology_only" and int(cfg.get("road_topo_feature_dim", 4)) != 4:
             raise ValueError("严格模式: road_topo_feature_dim 必须为 4")
+        if road_feature_mode == "start_static" and int(cfg.get("road_feature_dim", 33)) != 33:
+            raise ValueError("严格模式: start_static road_feature_dim 必须为 33")
         if int(cfg.get("syntax_feature_dim", 5)) != 5:
             raise ValueError("严格模式: syntax_feature_dim 必须为 5")
-        self.road_encoder = RoadTopologyEncoder(
+        road_encoder_cls = RoadTopologyEncoder if road_feature_mode == "topology_only" else RoadStaticEncoder
+        self.road_encoder = road_encoder_cls(
             self.rep_dim, int(cfg.get("road_gat_layers", 4)),
             int(cfg.get("road_gat_heads", 8)), float(cfg.get("road_dropout", 0.1)),
         )
+        self.road_feature_mode = road_feature_mode
         self.syntax_encoder = SyntaxEncoder(
             self.rep_dim, int(cfg.get("syntax_gat_layers", 2)),
             int(cfg.get("syntax_gat_heads", 4)), float(cfg.get("syntax_dropout", 0.1)),
@@ -189,8 +218,17 @@ class ThreeLayerStaticEncoder(nn.Module):
         validate_city_static_hierarchy(hierarchy)
         device = next(self.parameters()).device
         hierarchy = hierarchy.to(device)
-        # Bottom layer: topology-only Road input [M,4].
-        road_h = self.road_encoder(hierarchy.road_topo_x, hierarchy.road_edge_index)
+        expected_version = (
+            "three-layer-static-v1" if self.road_feature_mode == "topology_only"
+            else "three-layer-start-road-v2"
+        )
+        if hierarchy.metadata.get("feature_version") != expected_version:
+            raise ValueError(
+                f"严格模式: 模型 road_feature_mode={self.road_feature_mode!r} "
+                f"不能加载 {hierarchy.metadata.get('feature_version')!r} cache"
+            )
+        # Bottom layer: topology-only [M,4] or START static [M,33].
+        road_h = self.road_encoder(hierarchy.road_x, hierarchy.road_edge_index)
         road_to_syntax = sparse_pool(self._operator(hierarchy, "road_to_syntax", device), road_h)
         # Middle layer: five static spatial-syntax statistics plus pooled Road representation.
         syntax_h = self.syntax_encoder(
