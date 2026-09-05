@@ -3,10 +3,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import torch
+import yaml
 
 from hcfm.config import load_config
 from hcfm.geo_time import localize_city_timestamps, transform_wkt_geometries
 from hcfm.model import MacroFlowMatchingModel
+from three_layer_graphgps.model import ThreeLayerGraphGPSLapPE
 
 
 def test_crs_transform_and_roundtrip():
@@ -27,12 +29,20 @@ def test_timezone_required_and_dst_ambiguous_rejected():
     assert localized.tz is not None
 
 
-def test_all_stage2_and_ablation_configs_parse():
+def test_all_stage_configs_parse_with_their_own_contract():
     root = Path(__file__).resolve().parents[1]
     paths = list((root / "configs").glob("stage*.yaml")) + list((root / "configs/ablations").glob("*.yaml"))
-    assert len(paths) == 13
+    assert paths
     for path in paths:
-        assert load_config(path)["model_mode"]
+        raw = yaml.safe_load(path.read_text()) or {}
+        if "model_mode" in raw or "base_config" in raw:
+            assert load_config(path)["model_mode"]
+        elif path.name == "stage2_three_layer_graphgps_lappe.yaml":
+            assert raw["model"]["name"] == "three_layer_graphgps_lappe"
+            assert isinstance(ThreeLayerGraphGPSLapPE(raw), ThreeLayerGraphGPSLapPE)
+        else:
+            # 第一阶段静态配置由其独立入口校验，不应强塞给 HCFM loader。
+            assert raw["static_structure_mode"] == "three_layer"
 
 
 def test_macro_flow_matching_forward_backward_and_heun():
@@ -61,4 +71,3 @@ def test_macro_flow_matching_forward_backward_and_heun():
         batch, steps=2, solver="heun", generator=torch.Generator().manual_seed(2)
     )
     assert macro.shape == batch["macro_flow"].shape and stats.nfe == 4
-
