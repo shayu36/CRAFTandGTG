@@ -86,6 +86,17 @@ def _config(road_attention: str = "linear", full_max: int = 4096) -> dict:
             "encoder": "DeepSet",
             "cache": False,
         },
+        "frequency": {
+            "enabled": True,
+            "method": "low_rank_spectral_projection",
+            "decomposition_position": "after_graphgps",
+            "road_low_modes": 3,
+            "syntax_low_modes": 2,
+            "region_low_modes": 1,
+            "orthogonality_tolerance": 0.001,
+            "reconstruction_tolerance": 0.00001,
+            "output_version": "three-layer-spectral-features-v1",
+        },
         "attention": {
             "road_global_attn": road_attention,
             "road_full_attn_max_nodes": full_max,
@@ -96,6 +107,10 @@ def _config(road_attention: str = "linear", full_max: int = 4096) -> dict:
         "hierarchy": {
             "road_to_syntax_pool": "mean",
             "syntax_to_region_pool": "weighted_mean",
+        },
+        "data": {
+            "seq_length": 24,
+            "hierarchy_feature_version": "three-layer-start-road-v2",
         },
     }
 
@@ -176,10 +191,16 @@ def test_three_layer_graphgps_forward_backward_and_no_road_region_shortcut():
     model = ThreeLayerGraphGPSLapPE(_config())
     output = model(hierarchy, pe)
     assert output["H_road"].shape == (8, 16)
+    assert output["H_road_low"].shape == (8, 16)
+    assert output["H_road_high"].shape == (8, 16)
     assert output["pooled_road_to_syntax"].shape == (3, 16)
     assert output["H_syntax"].shape == (3, 16)
+    assert output["H_syntax_low"].shape == (3, 16)
+    assert output["H_syntax_high"].shape == (3, 16)
     assert output["pooled_syntax_to_region"].shape == (2, 16)
     assert output["H_region"].shape == (2, 16)
+    assert output["H_region_low"].shape == (2, 16)
+    assert output["H_region_high"].shape == (2, 16)
     assert output["pred"].shape == (2, 48)
     assert all(torch.isfinite(value).all() for value in output.values())
     output["pred"].square().mean().backward()
@@ -190,6 +211,7 @@ def test_three_layer_graphgps_forward_backward_and_no_road_region_shortcut():
         model.syntax_graphgps,
         model.region_input,
         model.region_graphgps,
+        model.frequency_fusion,
         model.prediction_head,
     )
     for module in modules:

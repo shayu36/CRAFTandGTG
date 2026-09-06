@@ -21,6 +21,18 @@ posenc:
   cache: true
   cache_dir: cache/graphgps_lappe_v1
 
+frequency:
+  enabled: true
+  method: low_rank_spectral_projection
+  decomposition_position: after_graphgps
+  road_low_modes: 16
+  syntax_low_modes: 16
+  region_low_modes: 16
+  orthogonality_tolerance: 0.001
+  reconstruction_tolerance: 0.00001
+  output_version: three-layer-spectral-features-v1
+  export_dir: outputs/stage2_three_layer_graphgps_lappe/spectral_features
+
 attention:
   # Road 默认使用线性全局注意力；标准 full attention 必须显式配置。
   road_global_attn: linear

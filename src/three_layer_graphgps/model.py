@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from craft_integrated.pyg_compat import GATv2Conv
 from static_hierarchy.contracts import CityStaticHierarchy, validate_city_static_hierarchy
 
+from .frequency import SpectralFeatureDecoupler
 from .pooling import pool_road_to_syntax, pool_syntax_to_region
 from .posenc import FeatureLapPEInit
 from .spectral_lap_pe import HierarchyLaplacianPE, pe_graph_hash, prepare_hierarchy_lappe
@@ -195,6 +196,53 @@ def _nested(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value
 
 
+def validate_stage2_config(config: Mapping[str, Any]) -> None:
+    """Validate the Stage 2 model/data/frequency contract before any data work."""
+
+    if not isinstance(config.get("frequency"), Mapping):
+        raise KeyError("严格模式: Stage 2 config 缺少 frequency mapping")
+    if not isinstance(config.get("data"), Mapping):
+        raise KeyError("严格模式: Stage 2 config 缺少 data mapping")
+    model_cfg = _nested(config, "model")
+    pos_cfg = _nested(config, "posenc")
+    frequency_cfg = _nested(config, "frequency")
+    data_cfg = _nested(config, "data")
+    if model_cfg.get("name", "three_layer_graphgps_lappe") != "three_layer_graphgps_lappe":
+        raise ValueError("严格模式: model.name 必须为 three_layer_graphgps_lappe")
+    if pos_cfg.get("type", "LapPE") != "LapPE":
+        raise ValueError("严格模式: 第一版仅支持 posenc.type=LapPE")
+    if frequency_cfg.get("enabled") is not True:
+        raise ValueError("严格模式: 第二阶段必须启用 explicit frequency decomposition")
+    if frequency_cfg.get("method", "low_rank_spectral_projection") != "low_rank_spectral_projection":
+        raise ValueError("严格模式: frequency.method 仅支持 low_rank_spectral_projection")
+    if frequency_cfg.get("decomposition_position", "after_graphgps") != "after_graphgps":
+        raise ValueError("严格模式: frequency.decomposition_position 仅支持 after_graphgps")
+    if frequency_cfg.get("output_version", "three-layer-spectral-features-v1") != "three-layer-spectral-features-v1":
+        raise ValueError("严格模式: frequency.output_version 必须为 three-layer-spectral-features-v1")
+    for layer in ("road", "syntax", "region"):
+        num_eig = int(pos_cfg.get(f"{layer}_num_eig", 16))
+        num_low = int(frequency_cfg.get(f"{layer}_low_modes", 16))
+        if num_eig <= 0:
+            raise ValueError(f"严格模式: posenc.{layer}_num_eig 必须为正")
+        if num_low <= 0:
+            raise ValueError(f"严格模式: frequency.{layer}_low_modes 必须为正")
+        if num_low > num_eig:
+            raise ValueError(
+                f"严格模式: frequency.{layer}_low_modes={num_low} 不能超过 "
+                f"posenc.{layer}_num_eig={num_eig}"
+            )
+    if "seq_length" not in data_cfg:
+        raise KeyError("严格模式: data.seq_length 必须显式配置")
+    sequence_length = int(data_cfg["seq_length"])
+    if sequence_length != 24:
+        raise ValueError("严格模式: 第一版仅支持 data.seq_length=24")
+    output_dim = int(model_cfg.get("output_dim", 48))
+    if output_dim != 2 * sequence_length:
+        raise ValueError(
+            f"严格模式: model.output_dim={output_dim} 必须等于 2 * data.seq_length={2 * sequence_length}"
+        )
+
+
 class ThreeLayerGraphGPSLapPE(nn.Module):
     """共享参数的三层 GraphGPS。
 
@@ -204,20 +252,24 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
 
     def __init__(self, config: Mapping[str, Any]) -> None:
         super().__init__()
+        validate_stage2_config(config)
         model_cfg = _nested(config, "model")
         pos_cfg = _nested(config, "posenc")
         attention_cfg = _nested(config, "attention")
         hierarchy_cfg = _nested(config, "hierarchy")
-        if model_cfg.get("name", "three_layer_graphgps_lappe") != "three_layer_graphgps_lappe":
-            raise ValueError("严格模式: model.name 必须为 three_layer_graphgps_lappe")
-        if pos_cfg.get("type", "LapPE") != "LapPE":
-            raise ValueError("严格模式: 第一版仅支持 posenc.type=LapPE")
+        frequency_cfg = _nested(config, "frequency")
         self.hidden_dim = int(model_cfg.get("hidden_dim", 128))
         self.output_dim = int(model_cfg.get("output_dim", 48))
         self.dropout = float(model_cfg.get("dropout", 0.1))
         self.road_k = int(pos_cfg.get("road_num_eig", 16))
         self.syntax_k = int(pos_cfg.get("syntax_num_eig", 16))
         self.region_k = int(pos_cfg.get("region_num_eig", 16))
+        self.road_low_modes = int(frequency_cfg.get("road_low_modes", 16))
+        self.syntax_low_modes = int(frequency_cfg.get("syntax_low_modes", 16))
+        self.region_low_modes = int(frequency_cfg.get("region_low_modes", 16))
+        self.frequency_output_version = str(
+            frequency_cfg.get("output_version", "three-layer-spectral-features-v1")
+        )
         pe_dim = int(pos_cfg.get("pe_dim", 16))
         pe_encoder = str(pos_cfg.get("encoder", "DeepSet"))
         self.laplacian_norm = str(pos_cfg.get("laplacian_norm", "sym"))
@@ -277,6 +329,22 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
             layer_name="region",
             **stack_common,
         )
+        decoupler_kwargs = {
+            "orthogonality_tolerance": float(
+                frequency_cfg.get("orthogonality_tolerance", 1e-3)
+            ),
+            "reconstruction_tolerance": float(
+                frequency_cfg.get("reconstruction_tolerance", 1e-5)
+            ),
+        }
+        self.road_decoupler = SpectralFeatureDecoupler(**decoupler_kwargs)
+        self.syntax_decoupler = SpectralFeatureDecoupler(**decoupler_kwargs)
+        self.region_decoupler = SpectralFeatureDecoupler(**decoupler_kwargs)
+        self.frequency_fusion = nn.Sequential(
+            nn.Linear(2 * self.hidden_dim, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
+            nn.GELU(),
+        )
         self.prediction_head = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.GELU(),
@@ -329,6 +397,8 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
 
         road_h0 = self.road_input(hierarchy.road_x, posenc.road)
         road_h = self.road_graphgps(road_h0, hierarchy.road_edge_index)
+        road_frequency = self.road_decoupler(road_h, posenc.road, self.road_low_modes)
+        # Cross-layer pooling intentionally consumes the mixed GraphGPS state.
         pooled_road = pool_road_to_syntax(
             road_h,
             hierarchy.num_syntax,
@@ -342,6 +412,9 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
         syntax_semantic = self.syntax_input(hierarchy.syntax_x, posenc.syntax)
         syntax_h0 = self.syntax_hierarchy_fusion(torch.cat([syntax_semantic, pooled_road], dim=-1))
         syntax_h = self.syntax_graphgps(syntax_h0, hierarchy.syntax_edge_index)
+        syntax_frequency = self.syntax_decoupler(
+            syntax_h, posenc.syntax, self.syntax_low_modes
+        )
         pooled_syntax = pool_syntax_to_region(
             syntax_h,
             edge_index=hierarchy.syntax_to_region_edge_index,
@@ -353,23 +426,44 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
         region_semantic = self.region_input(hierarchy.region_x, posenc.region)
         region_h0 = self.region_hierarchy_fusion(torch.cat([region_semantic, pooled_syntax], dim=-1))
         region_h = self.region_graphgps(region_h0, hierarchy.region_edge_index)
-        prediction = self.prediction_head(region_h)
+        region_frequency = self.region_decoupler(
+            region_h, posenc.region, self.region_low_modes
+        )
+        prediction_input = self.frequency_fusion(
+            torch.cat([region_frequency.low, region_frequency.high], dim=-1)
+        )
+        prediction = self.prediction_head(prediction_input)
         for name, tensor in (
             ("H_road", road_h),
+            ("H_road_low", road_frequency.low),
+            ("H_road_high", road_frequency.high),
             ("pooled_road_to_syntax", pooled_road),
             ("H_syntax", syntax_h),
+            ("H_syntax_low", syntax_frequency.low),
+            ("H_syntax_high", syntax_frequency.high),
             ("pooled_syntax_to_region", pooled_syntax),
             ("H_region", region_h),
+            ("H_region_low", region_frequency.low),
+            ("H_region_high", region_frequency.high),
             ("pred", prediction),
         ):
             if not torch.isfinite(tensor).all():
                 raise FloatingPointError(f"严格模式: {name} 含 NaN/Inf")
         result = {
             "H_road": road_h,
+            "H_road_low": road_frequency.low,
+            "H_road_high": road_frequency.high,
+            "road_low_coefficients": road_frequency.coefficients,
             "pooled_road_to_syntax": pooled_road,
             "H_syntax": syntax_h,
+            "H_syntax_low": syntax_frequency.low,
+            "H_syntax_high": syntax_frequency.high,
+            "syntax_low_coefficients": syntax_frequency.coefficients,
             "pooled_syntax_to_region": pooled_syntax,
             "H_region": region_h,
+            "H_region_low": region_frequency.low,
+            "H_region_high": region_frequency.high,
+            "region_low_coefficients": region_frequency.coefficients,
             "pred": prediction,
         }
         if return_edge_audit:
