@@ -12,6 +12,8 @@ import torch
 from static_hierarchy.contracts import CityStaticHierarchy
 from static_hierarchy.preprocessing import START_ROAD_FEATURE_ORDER
 from three_layer_graphgps.data import (
+    build_joint_three_layer_graph,
+    RELATION_TO_ID,
     GraphGPSCityData,
     RegionFlowTargets,
     load_source_region_flow_splits,
@@ -71,17 +73,13 @@ def _config(road_attention: str = "linear", full_max: int = 4096) -> dict:
             "name": "three_layer_graphgps_lappe",
             "hidden_dim": 16,
             "output_dim": 48,
-            "num_layers_road": 1,
-            "num_layers_syntax": 1,
-            "num_layers_region": 1,
+            "num_layers": 1,
             "dropout": 0.0,
         },
         "posenc": {
             "type": "LapPE",
             "laplacian_norm": "sym",
-            "road_num_eig": 4,
-            "syntax_num_eig": 4,
-            "region_num_eig": 4,
+            "joint_num_eig": 4,
             "pe_dim": 4,
             "encoder": "DeepSet",
             "cache": False,
@@ -90,18 +88,14 @@ def _config(road_attention: str = "linear", full_max: int = 4096) -> dict:
             "enabled": True,
             "method": "low_rank_spectral_projection",
             "decomposition_position": "after_graphgps",
-            "road_low_modes": 3,
-            "syntax_low_modes": 2,
-            "region_low_modes": 1,
+            "joint_low_modes": 3,
             "orthogonality_tolerance": 0.001,
             "reconstruction_tolerance": 0.00001,
-            "output_version": "three-layer-spectral-features-v1",
+            "output_version": "three-layer-joint-graphgps-spectral-features-v2",
         },
         "attention": {
-            "road_global_attn": road_attention,
-            "road_full_attn_max_nodes": full_max,
-            "syntax_global_attn": "full",
-            "region_global_attn": "full",
+            "global_attn": road_attention,
+            "full_attention_max_nodes": full_max,
             "num_heads": 4,
         },
         "hierarchy": {
@@ -143,13 +137,13 @@ def test_road_pe_uses_undirected_copy_without_overwriting_message_edges():
     hierarchy = _toy_hierarchy()
     original = hierarchy.road_edge_index.clone()
     pe = prepare_hierarchy_lappe(hierarchy, road_k=4, syntax_k=4, region_k=4)
-    pairs = set(map(tuple, pe.road.edge_index_pe.t().tolist()))
+    pairs = set(map(tuple, pe.joint.edge_index_pe.t().tolist()))
     assert (0, 1) in pairs and (1, 0) in pairs
     assert torch.equal(hierarchy.road_edge_index, original)
     model = ThreeLayerGraphGPSLapPE(_config()).eval()
     output = model(hierarchy, pe, return_edge_audit=True)
-    assert torch.equal(output["road_edge_index_msg"], original)
-    assert not torch.equal(output["road_edge_index_msg"], output["road_edge_index_pe"])
+    assert torch.equal(output["edge_index_joint_msg"][:,:7], original)
+    assert not torch.equal(output["edge_index_joint_msg"], output["edge_index_joint_pe"])
 
 
 def test_road_to_syntax_pool_supports_assignment_and_sparse_operator():
@@ -190,6 +184,9 @@ def test_three_layer_graphgps_forward_backward_and_no_road_region_shortcut():
     pe = prepare_hierarchy_lappe(hierarchy, road_k=4, syntax_k=4, region_k=4)
     model = ThreeLayerGraphGPSLapPE(_config())
     output = model(hierarchy, pe)
+    assert output["H_joint"].shape == (13, 16)
+    assert output["H_joint_low"].shape == (13, 16)
+    assert output["H_joint_high"].shape == (13, 16)
     assert output["H_road"].shape == (8, 16)
     assert output["H_road_low"].shape == (8, 16)
     assert output["H_road_high"].shape == (8, 16)
@@ -206,11 +203,9 @@ def test_three_layer_graphgps_forward_backward_and_no_road_region_shortcut():
     output["pred"].square().mean().backward()
     modules = (
         model.road_input,
-        model.road_graphgps,
         model.syntax_input,
-        model.syntax_graphgps,
         model.region_input,
-        model.region_graphgps,
+        model.graphgps,
         model.frequency_fusion,
         model.prediction_head,
     )
@@ -218,8 +213,22 @@ def test_three_layer_graphgps_forward_backward_and_no_road_region_shortcut():
         gradients = [parameter.grad for parameter in module.parameters() if parameter.requires_grad]
         assert any(gradient is not None for gradient in gradients)
         assert all(torch.isfinite(gradient).all() for gradient in gradients if gradient is not None)
+    assert model.num_graphgps_stacks == 1
+    assert sum(isinstance(module, type(model.graphgps)) for module in model.modules()) == 1
     assert not any("road_to_region" in name for name, _ in model.named_modules())
     assert "road_to_region_h" not in output
+    joint = build_joint_three_layer_graph(hierarchy)
+    assert joint.num_nodes == 8 + 3 + 2
+    assert not any(src < 8 and dst >= 11 for src, dst in joint.edge_index_joint.t().tolist())
+    assert joint.road_node_range == (0, 8)
+    assert joint.syntax_node_range == (8, 11)
+    assert joint.region_node_range == (11, 13)
+    assert joint.edge_type.shape[0] == joint.edge_index_joint.shape[1]
+    assert joint.edge_weight.shape[0] == joint.edge_index_joint.shape[1]
+    rs = joint.edge_type == RELATION_TO_ID["road_to_syntax"]
+    sr = joint.edge_type == RELATION_TO_ID["syntax_to_region"]
+    assert all(0 <= src < 8 and 8 <= dst < 11 for src, dst in joint.edge_index_joint[:, rs].t().tolist())
+    assert all(8 <= src < 11 and 11 <= dst < 13 for src, dst in joint.edge_index_joint[:, sr].t().tolist())
 
 
 def test_road_features_reach_region_only_through_syntax():
@@ -242,6 +251,32 @@ def test_road_full_attention_has_node_count_fallback():
         output = branch(torch.randn(8, 8))
     assert output.shape == (8, 8)
     assert torch.isfinite(output).all()
+
+
+def test_joint_global_attention_receives_all_nodes_and_single_stack():
+    hierarchy = _toy_hierarchy()
+    pe = prepare_hierarchy_lappe(hierarchy, joint_k=4)
+    model = ThreeLayerGraphGPSLapPE(_config())
+    seen = []
+    original = model.graphgps.forward
+
+    def wrapped(x, edge_index, edge_type, edge_weight):
+        seen.append(tuple(x.shape))
+        return original(x, edge_index, edge_type, edge_weight)
+
+    model.graphgps.forward = wrapped
+    model(hierarchy, pe)
+    assert seen == [(13, 16)]
+    assert model.num_graphgps_stacks == 1
+
+
+def test_joint_full_attention_fallback_uses_total_node_count():
+    hierarchy = _toy_hierarchy()
+    pe = prepare_hierarchy_lappe(hierarchy, joint_k=4)
+    model = ThreeLayerGraphGPSLapPE(_config(road_attention="full", full_max=10))
+    with pytest.warns(RuntimeWarning, match="联合图 13 个节点.*fallback"):
+        output = model(hierarchy, pe)
+    assert output["H_joint"].shape[0] == 13
 
 
 def test_external_lappe_graph_hash_mismatch_is_rejected():

@@ -90,52 +90,20 @@ def test_frequency_losses_keep_all_graphgps_gradients_connected():
     output = model(hierarchy, posenc)
     low_loss = sum(output[f"H_{layer}_low"].square().mean() for layer in ("road", "syntax", "region"))
     low_loss.backward()
-    for module in (
-        model.road_input,
-        model.road_input.lappe,
-        model.road_graphgps,
-        model.syntax_input,
-        model.syntax_input.lappe,
-        model.syntax_graphgps,
-        model.region_input,
-        model.region_input.lappe,
-        model.region_graphgps,
-    ):
+    for module in (model.road_input, model.syntax_input, model.region_input, model.joint_lappe, model.graphgps):
         _assert_module_has_finite_gradient(module)
 
     model.zero_grad(set_to_none=True)
     output = model(hierarchy, posenc)
     high_loss = sum(output[f"H_{layer}_high"].square().mean() for layer in ("road", "syntax", "region"))
     high_loss.backward()
-    for module in (
-        model.road_input,
-        model.road_input.lappe,
-        model.road_graphgps,
-        model.syntax_input,
-        model.syntax_input.lappe,
-        model.syntax_graphgps,
-        model.region_input,
-        model.region_input.lappe,
-        model.region_graphgps,
-    ):
+    for module in (model.road_input, model.syntax_input, model.region_input, model.joint_lappe, model.graphgps):
         _assert_module_has_finite_gradient(module)
 
     model.zero_grad(set_to_none=True)
     output = model(hierarchy, posenc)
     output["pred"].square().mean().backward()
-    for module in (
-        model.road_input,
-        model.road_input.lappe,
-        model.road_graphgps,
-        model.syntax_input,
-        model.syntax_input.lappe,
-        model.syntax_graphgps,
-        model.region_input,
-        model.region_input.lappe,
-        model.region_graphgps,
-        model.frequency_fusion,
-        model.prediction_head,
-    ):
+    for module in (model.road_input, model.syntax_input, model.region_input, model.joint_lappe, model.graphgps, model.frequency_fusion, model.prediction_head):
         _assert_module_has_finite_gradient(module)
 
 
@@ -143,7 +111,7 @@ def test_model_frequency_outputs_reconstruct_and_no_dense_projector_source():
     hierarchy = _toy_hierarchy()
     posenc = prepare_hierarchy_lappe(hierarchy, road_k=4, syntax_k=4, region_k=4)
     output = ThreeLayerGraphGPSLapPE(_config()).eval()(hierarchy, posenc)
-    expected_shapes = {"road": (8, 16), "syntax": (3, 16), "region": (2, 16)}
+    expected_shapes = {"joint": (13, 16), "road": (8, 16), "syntax": (3, 16), "region": (2, 16)}
     for layer, shape in expected_shapes.items():
         assert output[f"H_{layer}_low"].shape == shape
         assert output[f"H_{layer}_high"].shape == shape
@@ -165,15 +133,13 @@ def test_model_frequency_outputs_reconstruct_and_no_dense_projector_source():
 
 def test_default_attention_contract_is_preserved():
     model = ThreeLayerGraphGPSLapPE(_config())
-    assert all(layer.global_attention.mode == "linear" for layer in model.road_graphgps.layers)
-    assert all(layer.global_attention.mode == "full" for layer in model.syntax_graphgps.layers)
-    assert all(layer.global_attention.mode == "full" for layer in model.region_graphgps.layers)
+    assert all(layer.global_attention.mode == "linear" for layer in model.graphgps.layers)
 
 
 def test_frequency_config_contract_rejects_invalid_values():
     config = _config()
-    config["frequency"]["road_low_modes"] = 5
-    with pytest.raises(ValueError, match="不能超过"):
+    config["frequency"]["joint_low_modes"] = 5
+    with pytest.raises(ValueError, match="joint LapPE/low modes"):
         ThreeLayerGraphGPSLapPE(config)
 
     config = _config()
@@ -238,7 +204,7 @@ def test_spectral_export_roundtrip_rejects_graph_and_checkpoint_mismatch(tmp_pat
     changed = _toy_hierarchy()
     changed.road_edge_index = changed.road_edge_index.clone()
     changed.road_edge_index[:, 0] = torch.tensor([0, 2])
-    with pytest.raises(ValueError, match="road_graph_hash"):
+    with pytest.raises(ValueError, match="joint_graph_hash"):
         load_spectral_features(
             path,
             hierarchy=changed,

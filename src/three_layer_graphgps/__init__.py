@@ -1,15 +1,21 @@
 """第二阶段 Road→Syntax→Region GraphGPS + LapPE。"""
 
 from .data import (
+    RELATION_NAMES,
+    RELATION_TO_ID,
     SPECTRAL_FEATURE_VERSION,
     checkpoint_fingerprint,
     export_spectral_features,
     GraphGPSCityData,
+    JointThreeLayerGraph,
     RegionFlowTargets,
     load_source_region_flow_splits,
     load_spectral_features,
     load_stage2_hierarchy,
     prepare_city_data,
+    build_joint_three_layer_graph,
+    joint_graph_hash,
+    validate_joint_three_layer_graph,
 )
 from .frequency import (
     FrequencyComponents,
@@ -32,6 +38,7 @@ from .spectral_lap_pe import (
 
 __all__ = [
     "FeatureLapPEInit",
+    "JointThreeLayerGraph",
     "FrequencyComponents",
     "GraphGPSCityData",
     "HierarchyLaplacianPE",
@@ -41,6 +48,8 @@ __all__ = [
     "LowFrequencyTransferInputs",
     "RegionFlowTargets",
     "SPECTRAL_FEATURE_VERSION",
+    "RELATION_NAMES",
+    "RELATION_TO_ID",
     "SpectralFeatureDecoupler",
     "ThreeLayerGraphGPSLapPE",
     "compute_sparse_laplacian_eigenpairs",
@@ -50,6 +59,9 @@ __all__ = [
     "load_source_region_flow_splits",
     "load_spectral_features",
     "load_stage2_hierarchy",
+    "build_joint_three_layer_graph",
+    "joint_graph_hash",
+    "validate_joint_three_layer_graph",
     "pool_road_to_syntax",
     "pool_syntax_to_region",
     "pe_graph_hash",

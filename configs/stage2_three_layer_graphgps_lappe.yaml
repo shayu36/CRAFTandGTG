@@ -1,44 +1,36 @@
-# 第二阶段第一版：第一阶段 START v2 三层静态图 → GraphGPS + LapPE。
+# 第二阶段：第一阶段 START v2 三层静态图 → 联合异构 GraphGPS + LapPE。
 # 该入口与 HCFM/Flow Matching 的 stage2 配置完全独立。
 
 model:
   name: three_layer_graphgps_lappe
   hidden_dim: 128
   output_dim: 48
-  num_layers_road: 2
-  num_layers_syntax: 2
-  num_layers_region: 2
+  num_layers: 2
   dropout: 0.1
 
 posenc:
   type: LapPE
   laplacian_norm: sym
-  road_num_eig: 16
-  syntax_num_eig: 16
-  region_num_eig: 16
+  joint_num_eig: 16
   pe_dim: 16
   encoder: DeepSet
   cache: true
-  cache_dir: cache/graphgps_lappe_v1
+  cache_dir: cache/graphgps_lappe_v2
 
 frequency:
   enabled: true
   method: low_rank_spectral_projection
   decomposition_position: after_graphgps
-  road_low_modes: 16
-  syntax_low_modes: 16
-  region_low_modes: 16
+  joint_low_modes: 16
   orthogonality_tolerance: 0.001
   reconstruction_tolerance: 0.00001
-  output_version: three-layer-spectral-features-v1
+  output_version: three-layer-joint-graphgps-spectral-features-v2
   export_dir: outputs/stage2_three_layer_graphgps_lappe/spectral_features
 
 attention:
-  # Road 默认使用线性全局注意力；标准 full attention 必须显式配置。
-  road_global_attn: linear
-  road_full_attn_max_nodes: 4096
-  syntax_global_attn: full
-  region_global_attn: full
+  # 全部 M+K+N 节点共享同一个全局注意力分支。
+  global_attn: linear
+  full_attention_max_nodes: 4096
   num_heads: 4
 
 hierarchy:

@@ -15,7 +15,7 @@ from .data import GraphGPSCityData, RegionFlowTargets
 from .model import ThreeLayerGraphGPSLapPE
 
 
-CHECKPOINT_VERSION = "three-layer-graphgps-spectral-checkpoint-v2"
+CHECKPOINT_VERSION = "three-layer-joint-graphgps-spectral-checkpoint-v3"
 
 
 def _checkpoint_contract(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -25,19 +25,18 @@ def _checkpoint_contract(config: Mapping[str, Any]) -> dict[str, Any]:
     pos_cfg = config.get("posenc", {})
     frequency_cfg = config.get("frequency", {})
     data_cfg = config.get("data", {})
+    attention_cfg = config.get("attention", {})
     return {
         "model_name": model_cfg.get("name"),
         "hidden_dim": int(model_cfg.get("hidden_dim", 128)),
         "output_dim": int(model_cfg.get("output_dim", 48)),
-        "road_num_eig": int(pos_cfg.get("road_num_eig", 16)),
-        "syntax_num_eig": int(pos_cfg.get("syntax_num_eig", 16)),
-        "region_num_eig": int(pos_cfg.get("region_num_eig", 16)),
+        "joint_num_eig": int(pos_cfg.get("joint_num_eig", 16)),
         "frequency_method": frequency_cfg.get("method"),
         "decomposition_position": frequency_cfg.get("decomposition_position"),
-        "road_low_modes": int(frequency_cfg.get("road_low_modes", 16)),
-        "syntax_low_modes": int(frequency_cfg.get("syntax_low_modes", 16)),
-        "region_low_modes": int(frequency_cfg.get("region_low_modes", 16)),
+        "joint_low_modes": int(frequency_cfg.get("joint_low_modes", 16)),
         "frequency_output_version": frequency_cfg.get("output_version"),
+        "global_attn": attention_cfg.get("global_attn", "linear"),
+        "full_attention_max_nodes": int(attention_cfg.get("full_attention_max_nodes", 4096)),
         "static_feature_version": data_cfg.get("hierarchy_feature_version"),
         "seq_length": int(data_cfg.get("seq_length", 24)),
     }
@@ -75,29 +74,30 @@ def _city_metrics(prediction: torch.Tensor, target: RegionFlowTargets) -> dict[s
 def shape_summary(data: GraphGPSCityData, output: Mapping[str, torch.Tensor]) -> dict[str, list[int]]:
     hierarchy, pe = data.hierarchy, data.posenc
     return {
+        "num_joint_nodes": [int(hierarchy.num_roads + hierarchy.num_syntax + hierarchy.num_regions)],
+        "joint_eigvals": list(pe.joint.eigvals.shape),
+        "joint_eigvecs": list(pe.joint.eigvecs.shape),
+        "H_joint": list(output["H_joint"].shape),
+        "H_joint_low": list(output["H_joint_low"].shape),
+        "H_joint_high": list(output["H_joint_high"].shape),
+        "joint_low_coefficients": list(output["joint_low_coefficients"].shape),
         "road_x": list(hierarchy.road_x.shape),
-        "road_eigvals": list(pe.road.eigvals.shape),
-        "road_eigvecs": list(pe.road.eigvecs.shape),
+        "road_node_range": list(pe.road_node_range),
         "H_road": list(output["H_road"].shape),
         "H_road_low": list(output["H_road_low"].shape),
         "H_road_high": list(output["H_road_high"].shape),
-        "road_low_coefficients": list(output["road_low_coefficients"].shape),
         "road_to_syntax_pool": list(output["pooled_road_to_syntax"].shape),
         "syntax_x": list(hierarchy.syntax_x.shape),
-        "syntax_eigvals": list(pe.syntax.eigvals.shape),
-        "syntax_eigvecs": list(pe.syntax.eigvecs.shape),
+        "syntax_node_range": list(pe.syntax_node_range),
         "H_syntax": list(output["H_syntax"].shape),
         "H_syntax_low": list(output["H_syntax_low"].shape),
         "H_syntax_high": list(output["H_syntax_high"].shape),
-        "syntax_low_coefficients": list(output["syntax_low_coefficients"].shape),
         "syntax_to_region_pool": list(output["pooled_syntax_to_region"].shape),
         "region_x": list(hierarchy.region_x.shape),
-        "region_eigvals": list(pe.region.eigvals.shape),
-        "region_eigvecs": list(pe.region.eigvecs.shape),
+        "region_node_range": list(pe.region_node_range),
         "H_region": list(output["H_region"].shape),
         "H_region_low": list(output["H_region_low"].shape),
         "H_region_high": list(output["H_region_high"].shape),
-        "region_low_coefficients": list(output["region_low_coefficients"].shape),
         "pred": list(output["pred"].shape),
     }
 
@@ -109,27 +109,38 @@ def frequency_diagnostics(
     """Return reconstruction and orthogonal-residual diagnostics per layer."""
 
     diagnostics: dict[str, dict[str, float | int]] = {}
+    eigenpairs = data.posenc.joint
+    mixed = output["H_joint"]
+    low = output["H_joint_low"]
+    high = output["H_joint_high"]
+    coefficients = output["joint_low_coefficients"]
+    eigenpairs = eigenpairs.to(mixed.device)
+    valid_indices = torch.nonzero(eigenpairs.mask, as_tuple=False).flatten()
+    values = eigenpairs.eigvals[0, valid_indices, 0]
+    order = torch.argsort(values)
+    count = int(coefficients.shape[0])
+    selected = valid_indices[order[:count]]
+    basis = eigenpairs.eigvecs[:, selected]
+    denominator = torch.linalg.vector_norm(mixed).clamp_min(torch.finfo(mixed.dtype).eps)
+    reconstruction_error = torch.linalg.vector_norm(mixed - low - high) / denominator
+    residual_error = torch.linalg.vector_norm(basis.transpose(0, 1) @ high) / denominator
+    diagnostics = {"joint": {
+        "num_low_modes": count,
+        "cutoff_eigenvalue": float(eigenpairs.eigvals[0, selected[-1], 0].detach().cpu()),
+        "reconstruction_relative_error": float(reconstruction_error.detach().cpu()),
+        "orthogonal_residual_relative_error": float(residual_error.detach().cpu()),
+    }}
     for layer in ("road", "syntax", "region"):
         mixed = output[f"H_{layer}"]
         low = output[f"H_{layer}_low"]
         high = output[f"H_{layer}_high"]
-        coefficients = output[f"{layer}_low_coefficients"]
-        eigenpairs = getattr(data.posenc, layer).to(mixed.device)
-        valid_indices = torch.nonzero(eigenpairs.mask, as_tuple=False).flatten()
-        values = eigenpairs.eigvals[0, valid_indices, 0]
-        order = torch.argsort(values)
-        count = int(coefficients.shape[0])
-        selected = valid_indices[order[:count]]
-        basis = eigenpairs.eigvecs[:, selected]
         denominator = torch.linalg.vector_norm(mixed).clamp_min(torch.finfo(mixed.dtype).eps)
         reconstruction_error = torch.linalg.vector_norm(mixed - low - high) / denominator
-        residual_error = torch.linalg.vector_norm(basis.transpose(0, 1) @ high) / denominator
-        cutoff = eigenpairs.eigvals[0, selected[-1], 0]
         diagnostics[layer] = {
             "num_low_modes": count,
-            "cutoff_eigenvalue": float(cutoff.detach().cpu()),
+            "cutoff_eigenvalue": diagnostics["joint"]["cutoff_eigenvalue"],
             "reconstruction_relative_error": float(reconstruction_error.detach().cpu()),
-            "orthogonal_residual_relative_error": float(residual_error.detach().cpu()),
+            "orthogonal_residual_relative_error": diagnostics["joint"]["orthogonal_residual_relative_error"],
         }
     return diagnostics
 
@@ -192,7 +203,7 @@ def load_checkpoint(
 ) -> dict[str, Any]:
     state = torch.load(Path(path), map_location="cpu", weights_only=False)
     if state.get("format_version") != CHECKPOINT_VERSION:
-        raise ValueError("严格模式: 不是 three-layer GraphGPS spectral checkpoint v2")
+        raise ValueError("严格模式: 不是 three-layer-joint-graphgps-spectral-checkpoint-v3")
     if state.get("contract") != _checkpoint_contract(state.get("config", {})):
         raise ValueError("严格模式: checkpoint 内部 config/contract 不一致")
     if expected_config is not None and state.get("contract") != _checkpoint_contract(expected_config):

@@ -1,4 +1,4 @@
-"""Explicit spectral low/high decomposition for Stage 2 graph features."""
+"""Explicit spectral low/high decomposition for the unified Stage 2 graph."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .spectral_lap_pe import LaplacianEigenpairs
 
 @dataclass(frozen=True)
 class FrequencyComponents:
-    """Mixed GraphGPS features and their exact spectral decomposition."""
+    """Mixed joint GraphGPS features and their exact spectral decomposition."""
 
     mixed: torch.Tensor
     low: torch.Tensor

@@ -75,9 +75,10 @@ def _prepare(
             lappe_cache_dir=(
                 _absolute(pos_cfg["cache_dir"]) if bool(pos_cfg.get("cache", True)) else None
             ),
-            road_k=int(pos_cfg.get("road_num_eig", 16)),
-            syntax_k=int(pos_cfg.get("syntax_num_eig", 16)),
-            region_k=int(pos_cfg.get("region_num_eig", 16)),
+            road_k=int(pos_cfg.get("joint_num_eig", 16)),
+            syntax_k=int(pos_cfg.get("joint_num_eig", 16)),
+            region_k=int(pos_cfg.get("joint_num_eig", 16)),
+            joint_k=int(pos_cfg.get("joint_num_eig", 16)),
             normalization=str(pos_cfg.get("laplacian_norm", "sym")),
             require_targets=require_targets,
             norm_flow_root=_absolute(data_cfg["norm_flow_root"]) if require_targets else None,
@@ -93,16 +94,16 @@ def _static_summary(data: GraphGPSCityData) -> dict:
     return {
         "city": hierarchy.city_id,
         "road_x": list(hierarchy.road_x.shape),
-        "road_edge_index_msg": list(hierarchy.road_edge_index.shape),
-        "road_edge_index_pe": list(pe.road.edge_index_pe.shape),
-        "road_eigvals": list(pe.road.eigvals.shape),
-        "road_eigvecs": list(pe.road.eigvecs.shape),
+        "joint_edge_index_msg": list(data.joint_graph.edge_index_joint.shape if data.joint_graph is not None else (2, 0)),
+        "joint_edge_index_pe": list(pe.joint.edge_index_pe.shape),
+        "joint_eigvals": list(pe.joint.eigvals.shape),
+        "joint_eigvecs": list(pe.joint.eigvecs.shape),
         "syntax_x": list(hierarchy.syntax_x.shape),
-        "syntax_eigvals": list(pe.syntax.eigvals.shape),
-        "syntax_eigvecs": list(pe.syntax.eigvecs.shape),
+        "num_joint_nodes": pe.metadata.get("num_joint_nodes"),
         "region_x": list(hierarchy.region_x.shape),
-        "region_eigvals": list(pe.region.eigvals.shape),
-        "region_eigvecs": list(pe.region.eigvecs.shape),
+        "road_node_range": list(pe.road_node_range),
+        "syntax_node_range": list(pe.syntax_node_range),
+        "region_node_range": list(pe.region_node_range),
     }
 
 
@@ -157,18 +158,16 @@ def main() -> None:
                 summary["frequency"] = frequency_diagnostics(data, output)
                 summary["forward_seconds"] = forward_seconds
                 summary["backward_finite"] = True
-                summary["road_frequency_seconds"] = model.road_decoupler.last_elapsed_seconds
-                summary["road_frequency_estimated_intermediate_bytes"] = (
-                    model.road_decoupler.last_estimated_intermediate_bytes
+                summary["joint_frequency_seconds"] = model.joint_decoupler.last_elapsed_seconds
+                summary["joint_frequency_estimated_intermediate_bytes"] = (
+                    model.joint_decoupler.last_estimated_intermediate_bytes
                 )
                 # Linux ru_maxrss is reported in KiB.
                 summary["process_peak_rss_bytes"] = int(
                     resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
                 )
-                if not torch.equal(
-                    output["road_edge_index_msg"].cpu(), data.hierarchy.road_edge_index.cpu()
-                ):
-                    raise RuntimeError("严格模式: Road message edge 被 LapPE 覆盖")
+                if torch.equal(output["edge_index_joint_msg"].cpu(), output["edge_index_joint_pe"].cpu()):
+                    raise RuntimeError("严格模式: 联合有向消息边不应被 LapPE 无向边替换")
         print(json.dumps({"action": args.action, "cities": summaries}, indent=2, ensure_ascii=False))
         return
 

@@ -1,7 +1,7 @@
-"""三层 GraphGPS 使用的稀疏 Laplacian positional encoding。
+"""Unified three-layer sparse Laplacian positional encoding.
 
-Road/Syntax/Region 的消息图保持原契约；本模块只为 LapPE 构造无向图副本，
-并使用 SciPy sparse ``eigsh`` 求解最小特征对，禁止在大图上稠密分解。
+The directed heterogeneous message graph is never replaced.  LapPE receives a
+separate undirected copy containing every relation and uses sparse ``eigsh``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from scipy.sparse.linalg import ArpackNoConvergence, eigsh
 from static_hierarchy.contracts import CityStaticHierarchy, validate_city_static_hierarchy
 
 
-LAPPE_VERSION = "three-layer-lappe-v1"
+LAPPE_VERSION = "three-layer-joint-lappe-v2"
 
 
 @dataclass(frozen=True)
@@ -51,16 +51,38 @@ class LaplacianEigenpairs:
 
 @dataclass(frozen=True)
 class HierarchyLaplacianPE:
-    road: LaplacianEigenpairs
-    syntax: LaplacianEigenpairs
-    region: LaplacianEigenpairs
+    joint: LaplacianEigenpairs
+    road_node_range: tuple[int, int]
+    syntax_node_range: tuple[int, int]
+    region_node_range: tuple[int, int]
+    metadata: dict[str, Any]
 
     def to(self, device: torch.device | str) -> "HierarchyLaplacianPE":
         return HierarchyLaplacianPE(
-            road=self.road.to(device),
-            syntax=self.syntax.to(device),
-            region=self.region.to(device),
+            joint=self.joint.to(device),
+            road_node_range=self.road_node_range,
+            syntax_node_range=self.syntax_node_range,
+            region_node_range=self.region_node_range,
+            metadata=self.metadata,
         )
+
+    @property
+    def joint_eigvals(self) -> torch.Tensor:
+        """Compatibility view of the shared spectrum as ``[1,k,1]``."""
+
+        return self.joint.eigvals[:1]
+
+    @property
+    def joint_eigvecs(self) -> torch.Tensor:
+        return self.joint.eigvecs
+
+    @property
+    def joint_eigenpair_mask(self) -> torch.Tensor:
+        return self.joint.mask
+
+    @property
+    def edge_index_joint_pe(self) -> torch.Tensor:
+        return self.joint.edge_index_pe
 
 
 def _validate_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -251,6 +273,7 @@ def compute_sparse_laplacian_eigenpairs(
     cache_dir: str | Path | None = None,
     *,
     pe_version: str = LAPPE_VERSION,
+    metadata_extra: dict[str, Any] | None = None,
 ) -> LaplacianEigenpairs:
     """以固定形状返回最小 Laplacian eigenpairs，并可按图指纹缓存。
 
@@ -275,6 +298,8 @@ def compute_sparse_laplacian_eigenpairs(
         "pe_graph_is_undirected": True,
         "pe_version": str(pe_version),
     }
+    if metadata_extra:
+        identity.update(metadata_extra)
     path = None
     if cache_dir is not None:
         if not cache_key:
@@ -324,47 +349,60 @@ def compute_sparse_laplacian_eigenpairs(
 def prepare_hierarchy_lappe(
     hierarchy: CityStaticHierarchy,
     *,
-    road_k: int,
-    syntax_k: int,
-    region_k: int,
+    road_k: int | None = None,
+    syntax_k: int | None = None,
+    region_k: int | None = None,
+    joint_k: int | None = None,
     normalization: str = "sym",
     cache_dir: str | Path | None = None,
     pe_version: str = LAPPE_VERSION,
 ) -> HierarchyLaplacianPE:
-    """为三层静态图准备 LapPE，不读取任何动态流量。"""
+    """Prepare one shared LapPE spectrum for the complete directed hierarchy."""
 
     validate_city_static_hierarchy(hierarchy)
+    # Import lazily to avoid a module cycle (data.py also exposes the public
+    # graph builder and imports this module for the PE dataclass).
+    from .data import build_joint_three_layer_graph
+
+    graph = build_joint_three_layer_graph(hierarchy)
+    requested = [value for value in (road_k, syntax_k, region_k) if value is not None]
+    if joint_k is None:
+        joint_k = max(requested) if requested else 16
+    joint_k = int(joint_k)
+    if joint_k <= 0:
+        raise ValueError("严格模式: joint_k 必须为正")
     graph_version = hierarchy.metadata.get("feature_version")
-    base = f"{hierarchy.city_id}_{graph_version}"
+    base = f"{hierarchy.city_id}_{graph_version}_joint_{graph.joint_graph_hash[:16]}"
+    metadata_extra = {
+        "hierarchy_version": str(graph_version),
+        "joint_graph_hash": graph.joint_graph_hash,
+        "num_joint_nodes": graph.num_nodes,
+        "road_node_range": list(graph.road_node_range),
+        "syntax_node_range": list(graph.syntax_node_range),
+        "region_node_range": list(graph.region_node_range),
+    }
+    joint = compute_sparse_laplacian_eigenpairs(
+        graph.edge_index_joint,
+        graph.num_nodes,
+        joint_k,
+        normalization,
+        is_directed=True,
+        cache_key=base,
+        cache_dir=cache_dir,
+        pe_version=pe_version,
+        metadata_extra=metadata_extra,
+    )
+    if joint.metadata.get("joint_graph_hash") != graph.joint_graph_hash:
+        raise ValueError("严格模式: LapPE joint_graph_hash 与联合消息图不一致")
     return HierarchyLaplacianPE(
-        road=compute_sparse_laplacian_eigenpairs(
-            hierarchy.road_edge_index,
-            hierarchy.num_roads,
-            road_k,
-            normalization,
-            is_directed=True,
-            cache_key=f"{base}_road",
-            cache_dir=cache_dir,
-            pe_version=pe_version,
-        ),
-        syntax=compute_sparse_laplacian_eigenpairs(
-            hierarchy.syntax_edge_index,
-            hierarchy.num_syntax,
-            syntax_k,
-            normalization,
-            is_directed=True,
-            cache_key=f"{base}_syntax",
-            cache_dir=cache_dir,
-            pe_version=pe_version,
-        ),
-        region=compute_sparse_laplacian_eigenpairs(
-            hierarchy.region_edge_index,
-            hierarchy.num_regions,
-            region_k,
-            normalization,
-            is_directed=True,
-            cache_key=f"{base}_region",
-            cache_dir=cache_dir,
-            pe_version=pe_version,
-        ),
+        joint=joint,
+        road_node_range=graph.road_node_range,
+        syntax_node_range=graph.syntax_node_range,
+        region_node_range=graph.region_node_range,
+        metadata={
+            "joint_graph_hash": graph.joint_graph_hash,
+            "num_joint_nodes": graph.num_nodes,
+            "hierarchy_version": graph_version,
+            "pe_version": pe_version,
+        },
     )
