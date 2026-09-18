@@ -1,4 +1,9 @@
-"""保持第一阶段语义的 Region 级、源城市 train-only RAG。"""
+"""保持旧 Region RAG 兼容，同时导出新的三层 Hierarchical RAG。
+
+旧的 :class:`SourceTrainRegionRetriever` 仍供第一阶段回归测试使用；新的
+``HierarchicalThreeLayerRAG`` 独立接收 Stage-2 三层低频特征、三层时间序列
+和日历条件，不会把高频特征或原始节点 ID 送入检索器。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,25 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
+
+from three_layer_rag import (
+    HierarchicalRAG,
+    HierarchicalThreeLayerRAG,
+    ThreeLayerRAG,
+    ThreeLayerRAGInputs,
+    ThreeLayerRAGMemory,
+)
+
+__all__ = [
+    "RetrievalRecord",
+    "SourceTrainRegionRetriever",
+    "assert_retriever_no_target_leakage",
+    "HierarchicalThreeLayerRAG",
+    "HierarchicalRAG",
+    "ThreeLayerRAG",
+    "ThreeLayerRAGInputs",
+    "ThreeLayerRAGMemory",
+]
 
 
 @dataclass(frozen=True)

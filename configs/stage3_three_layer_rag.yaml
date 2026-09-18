@@ -1,0 +1,52 @@
+# Stage 3 Hierarchical RAG。
+# 真实城市 tensor bundle / memory 只从本地路径读取，不提交到 Git。
+
+# 让仓库现有阶段配置审计将该独立入口识别为三层路线；不表示 RAG 重建静态图。
+static_structure_mode: three_layer
+
+rag:
+  name: three_layer_hierarchical_rag
+  contract_version: three-layer-hierarchical-rag-v1
+  low_dim: 128                         # Stage-2 H_*_low hidden dimension
+  seq_length: 24
+  temporal_channels:
+    road: 3                            # 例如 count/speed/travel_time
+    syntax: 3                          # 由 Road 动态按 Road→Syntax 聚合
+    region: 2                          # in_flow/out_flow
+  temporal_dim: 64
+  retrieval_dim: 128
+  temporal_layers: 1
+  temporal_dropout: 0.0
+  calendar_dims:
+    month: 8
+    weekday: 8
+    start_hour: 8
+    holiday: 4
+  top_k: 5
+  metric: cosine
+  temperature: 1.0
+  match_month: true
+  match_holiday: false
+
+data:
+  source_cities:
+    - beijing
+    - chengdushi
+    - xianshi
+  source_split: train
+  # Stage-2 低频输出的本地目录；运行时由导出 manifest 指向具体文件。
+  spectral_feature_dir: outputs/stage2_three_layer_graphgps_lappe/spectral_features
+  temporal_feature_dir: data
+  # 由 scripts/build_rag_memory.py 生成的本地 memory；不纳入版本控制。
+  memory_path: outputs/stage3_three_layer_rag/rag_memory_v1.pt
+  input_manifest: null
+
+hierarchy:
+  # 若 cache 中没有一对一父节点 assignment，RAG 使用有限且可审计的父层均值上下文。
+  parent_index_keys:
+    road_to_syntax: road_to_syntax
+    syntax_to_region: syntax_to_region
+
+outputs:
+  directory: outputs/stage3_three_layer_rag
+  reference_version: three-layer-hierarchical-rag-references-v1
