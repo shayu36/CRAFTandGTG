@@ -15,6 +15,18 @@ from .model import (
     TemporalSequenceEncoder,
     ThreeLayerRAG,
 )
+from .io import (
+    STAGE2_SPECTRAL_VERSION,
+    build_rag_inputs_from_local_artifacts,
+    load_stage2_low_features,
+    parent_operators_from_hierarchy,
+)
+from .training import (
+    RAG_CHECKPOINT_VERSION,
+    RAGTrainer,
+    load_rag_checkpoint,
+    save_rag_checkpoint,
+)
 
 __all__ = [
     "CalendarEncoder",
@@ -28,4 +40,12 @@ __all__ = [
     "ThreeLayerRAGInputs",
     "ThreeLayerRAGMemory",
     "assert_no_high_frequency_input",
+    "STAGE2_SPECTRAL_VERSION",
+    "build_rag_inputs_from_local_artifacts",
+    "load_stage2_low_features",
+    "parent_operators_from_hierarchy",
+    "RAG_CHECKPOINT_VERSION",
+    "RAGTrainer",
+    "load_rag_checkpoint",
+    "save_rag_checkpoint",
 ]

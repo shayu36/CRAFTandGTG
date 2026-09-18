@@ -3,8 +3,13 @@ import pytest
 
 from three_layer_rag import (
     HierarchicalThreeLayerRAG,
+    STAGE2_SPECTRAL_VERSION,
     ThreeLayerRAGInputs,
     ThreeLayerRAGMemory,
+    load_stage2_low_features,
+    RAGTrainer,
+    load_rag_checkpoint,
+    save_rag_checkpoint,
 )
 
 
@@ -16,6 +21,7 @@ def _snapshot(city: str, split: str = "train", offset: float = 0.0):
         "syntax": torch.randn(2, 2, 6) + offset,
         "region": torch.randn(1, 2, 6) + offset,
     }
+    value_temporal = {layer: value + 3.0 for layer, value in temporal.items()}
     return ThreeLayerRAGInputs(
         city_id=city,
         split=split,
@@ -26,6 +32,7 @@ def _snapshot(city: str, split: str = "train", offset: float = 0.0):
             "road_to_syntax": torch.tensor([0, 0, 1, 1]),
             "syntax_to_region": torch.tensor([0, 0]),
         },
+        value_temporal_features=value_temporal,
     )
 
 
@@ -71,6 +78,7 @@ def test_rag_memory_is_source_train_only_and_round_trips(tmp_path):
     loaded = ThreeLayerRAGMemory.load(path)
     assert loaded.source_cities == ("beijing",)
     assert loaded.snapshots[0].city_id == "beijing"
+    assert loaded.snapshots[0].value_temporal_features is not None
     with pytest.raises(ValueError, match="RAG 泄漏防护"):
         ThreeLayerRAGMemory.from_snapshots(
             [_snapshot("xianshi", "test")], source_cities=["xianshi"]
@@ -101,6 +109,7 @@ def test_graphgps_adapter_reads_low_bands_without_high_band_dependency():
         city_id="xianshi",
         split="test",
         parent_index=snapshot.parent_index,
+        value_temporal_features=snapshot.value_temporal_features,
     )
     assert set(converted.low_features) == {"road", "syntax", "region"}
 
@@ -117,3 +126,109 @@ def test_calendar_mismatch_has_no_silent_candidate_fallback():
     )
     with pytest.raises(LookupError, match="无 source-train 候选"):
         model(query, memory=memory)
+
+
+def test_sparse_weighted_parent_operator_is_used_for_multi_parent_context():
+    model = _model()
+    source = _snapshot("beijing")
+    target = _snapshot("xianshi", "test")
+    operator = {
+        "road_to_syntax": {
+            "edge_index": torch.tensor([[0, 0, 1, 1], [0, 1, 2, 3]]),
+            "weight": torch.tensor([1.0, 1.0, 1.0, 1.0]),
+        },
+        "syntax_to_region": {
+            "edge_index": torch.tensor([[0, 0, 0], [0, 1, 1]]),
+            "weight": torch.tensor([0.2, 0.3, 0.7]),
+        },
+    }
+    source = ThreeLayerRAGInputs(
+        city_id=source.city_id, split=source.split,
+        low_features=source.low_features, temporal_features=source.temporal_features,
+        calendar=source.calendar, parent_operator=operator,
+        value_temporal_features=source.value_temporal_features,
+    )
+    target = ThreeLayerRAGInputs(
+        city_id=target.city_id, split=target.split,
+        low_features=target.low_features, temporal_features=target.temporal_features,
+        calendar=target.calendar, parent_operator=operator,
+        value_temporal_features=target.value_temporal_features,
+    )
+    memory = model.build_memory([source], source_cities=["beijing"])
+    output = model(target, memory=memory)
+    assert output["R_syntax"].shape == (1, 2, 2, 6)
+    assert torch.isfinite(output["R_road"]).all()
+
+
+def test_history_and_value_sequences_cannot_be_silently_reused():
+    snapshot = _snapshot("beijing")
+    legacy = ThreeLayerRAGInputs(
+        city_id=snapshot.city_id, split=snapshot.split,
+        low_features=snapshot.low_features, temporal_features=snapshot.temporal_features,
+        calendar=snapshot.calendar, parent_index=snapshot.parent_index,
+    )
+    with pytest.raises(ValueError, match="value_temporal_features"):
+        HierarchicalThreeLayerRAG.build_memory([legacy], source_cities=["beijing"])
+
+
+def test_memory_graph_identity_is_per_city_and_strict(tmp_path):
+    first = _snapshot("beijing")
+    second = _snapshot("chengdushi", offset=1.0)
+    required = {
+        "joint_graph_hash": "hash",
+        "checkpoint_fingerprint": "checkpoint",
+        "static_feature_version": "three-layer-start-road-v2",
+        "spectral_feature_version": STAGE2_SPECTRAL_VERSION,
+        "road_node_range": (0, 4),
+        "syntax_node_range": (4, 6),
+        "region_node_range": (6, 7),
+    }
+    first = ThreeLayerRAGInputs(**{**first.__dict__, "graph_metadata": {**required, "city_id": "beijing"}})
+    second_meta = {**required, "city_id": "chengdushi", "joint_graph_hash": "other-hash"}
+    second = ThreeLayerRAGInputs(**{**second.__dict__, "graph_metadata": second_meta})
+    memory = ThreeLayerRAGMemory.from_snapshots(
+        [first, second], source_cities=["beijing", "chengdushi"], require_graph_identity=True
+    )
+    path = tmp_path / "strict-memory.pt"
+    memory.save(path)
+    loaded = ThreeLayerRAGMemory.load(path)
+    assert loaded.graph_identity["beijing"]["joint_graph_hash"] == "hash"
+    assert loaded.graph_identity["chengdushi"]["joint_graph_hash"] == "other-hash"
+
+
+def test_stage2_low_feature_loader_rejects_old_version_and_reads_v2(tmp_path):
+    payload = {
+        "format_version": STAGE2_SPECTRAL_VERSION,
+        "city_id": "beijing",
+        "checkpoint_fingerprint": "a" * 64,
+        "joint_graph_hash": "hash",
+        "static_feature_version": "three-layer-start-road-v2",
+        "road_node_range": (0, 4), "syntax_node_range": (4, 6), "region_node_range": (6, 7),
+        "H_road_low": torch.zeros(4, 8),
+        "H_syntax_low": torch.zeros(2, 8),
+        "H_region_low": torch.zeros(1, 8),
+    }
+    path = tmp_path / "features.pt"
+    torch.save(payload, path)
+    low, identity = load_stage2_low_features(path, expected_city_id="beijing")
+    assert low["road"].shape == (4, 8)
+    assert identity["spectral_feature_version"] == STAGE2_SPECTRAL_VERSION
+
+
+def test_joint_trainer_and_checkpoint_round_trip(tmp_path):
+    model = _model()
+    source = _snapshot("beijing")
+    query = _snapshot("xianshi", "test")
+    memory = model.build_memory([source], source_cities=["beijing"])
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = RAGTrainer(model, optimizer)
+    _, metrics = trainer.train_step(
+        query,
+        memory=memory,
+        objective=lambda output: sum(output[f"R_{layer}"].square().mean() for layer in ("road", "syntax", "region")),
+    )
+    assert metrics["rag_loss"] >= 0
+    path = tmp_path / "rag.pt"
+    save_rag_checkpoint(path, model, optimizer=optimizer, step=3)
+    loaded = load_rag_checkpoint(path, model, optimizer=optimizer)
+    assert loaded["step"] == 3

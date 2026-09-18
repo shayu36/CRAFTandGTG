@@ -16,6 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .contracts import (
+    GRAPH_IDENTITY_KEYS,
     LAYER_NAMES,
     ThreeLayerRAGInputs,
     ThreeLayerRAGMemory,
@@ -169,6 +170,8 @@ class HierarchicalThreeLayerRAG(nn.Module):
         temperature: float = 1.0,
         match_month: bool = True,
         match_holiday: bool = False,
+        require_value_separation: bool = True,
+        expected_graph_identity: Mapping[str, Any] | None = None,
     ):
         super().__init__()
         if low_dims is None:
@@ -232,6 +235,8 @@ class HierarchicalThreeLayerRAG(nn.Module):
         self.temperature = float(temperature)
         self.match_month = bool(match_month)
         self.match_holiday = bool(match_holiday)
+        self.require_value_separation = bool(require_value_separation)
+        self.expected_graph_identity = dict(expected_graph_identity or {}) or None
         self.memory: ThreeLayerRAGMemory | None = None
 
     @property
@@ -243,16 +248,19 @@ class HierarchicalThreeLayerRAG(nn.Module):
         return False
 
     def set_memory(self, memory: ThreeLayerRAGMemory) -> "HierarchicalThreeLayerRAG":
-        memory.validate()
+        memory.validate(self.expected_graph_identity)
         self.memory = memory
         return self
 
     @staticmethod
     def build_memory(
-        snapshots: Sequence[ThreeLayerRAGInputs], *, source_cities: Iterable[str], split: str = "train"
+        snapshots: Sequence[ThreeLayerRAGInputs], *, source_cities: Iterable[str], split: str = "train",
+        require_value_separation: bool = True, require_graph_identity: bool = False,
     ) -> ThreeLayerRAGMemory:
         return ThreeLayerRAGMemory.from_snapshots(
-            snapshots, source_cities=tuple(source_cities), split=split
+            snapshots, source_cities=tuple(source_cities), split=split,
+            require_value_separation=require_value_separation,
+            require_graph_identity=require_graph_identity,
         )
 
     def _validate_batch(
@@ -335,12 +343,56 @@ class HierarchicalThreeLayerRAG(nn.Module):
         return output
 
     @staticmethod
+    def _batch_operators(
+        parent_operator: Mapping[str, Mapping[str, torch.Tensor]] | None,
+        device: torch.device,
+        expected_sizes: Mapping[str, tuple[int, int]],
+    ) -> dict[str, dict[str, torch.Tensor]]:
+        if parent_operator is None:
+            return {}
+        unknown = set(parent_operator) - set(expected_sizes)
+        if unknown:
+            raise ValueError(f"严格模式: 未知 parent_operator 字段 {sorted(unknown)}")
+        output = {}
+        for name, value in parent_operator.items():
+            if not isinstance(value, Mapping) or set(value) != {"edge_index", "weight"}:
+                raise ValueError(f"严格模式: parent_operator.{name} 必须包含 edge_index/weight")
+            edge = value["edge_index"] if isinstance(value["edge_index"], torch.Tensor) else torch.as_tensor(value["edge_index"])
+            weight = value["weight"] if isinstance(value["weight"], torch.Tensor) else torch.as_tensor(value["weight"])
+            edge = edge.to(device=device, dtype=torch.long)
+            weight = weight.to(device=device, dtype=torch.float32)
+            parent_size, child_size = expected_sizes[name][1], expected_sizes[name][0]
+            if edge.ndim != 2 or edge.shape[0] != 2 or weight.ndim != 1 or weight.shape[0] != edge.shape[1]:
+                raise ValueError(f"严格模式: parent_operator.{name} shape 非法")
+            if edge.numel() and (
+                int(edge[0].min()) < 0 or int(edge[0].max()) >= parent_size
+                or int(edge[1].min()) < 0 or int(edge[1].max()) >= child_size
+            ):
+                raise ValueError(f"严格模式: parent_operator.{name} 索引越界")
+            if not torch.isfinite(weight).all() or (weight <= 0).any():
+                raise ValueError(f"严格模式: parent_operator.{name}.weight 非法")
+            output[name] = {"edge_index": edge, "weight": weight}
+        return output
+
+    @staticmethod
     def _aggregate_parent(
         parent: torch.Tensor, target_size: int, indices: torch.Tensor | None,
+        operator: Mapping[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        # parent [B,P,F], indices [B,target].  Missing assignment uses a
-        # deterministic mean context, never a synthetic ID.
+        # parent [B,P,F], operator row=parent/col=child.  The transpose is
+        # row-normalized per child so multi-parent geometry weights are kept.
         batch, _, width = parent.shape
+        if operator is not None:
+            edge, weight = operator["edge_index"], operator["weight"]
+            parent_index, child_index = edge[0], edge[1]
+            denominator = parent.new_zeros(target_size)
+            denominator.index_add_(0, child_index, weight.to(parent.dtype))
+            normalized = weight.to(parent.dtype) / denominator[child_index].clamp_min(1e-8)
+            output = parent.new_zeros((batch, target_size, width))
+            for batch_index in range(batch):
+                values = parent[batch_index, parent_index] * normalized.unsqueeze(-1)
+                output[batch_index].index_add_(0, child_index, values)
+            return output
         if indices is None:
             return parent.mean(dim=1, keepdim=True).expand(batch, target_size, width)
         if indices.shape != (batch, target_size):
@@ -355,32 +407,67 @@ class HierarchicalThreeLayerRAG(nn.Module):
             return None
         return torch.gather(second, 1, first)
 
+    @staticmethod
+    def _compose_parent_operators(
+        first: Mapping[str, torch.Tensor] | None,
+        second: Mapping[str, torch.Tensor] | None,
+    ) -> dict[str, torch.Tensor] | None:
+        """Compose (syntax<-road) and (region<-syntax) sparse operators."""
+
+        if first is None or second is None:
+            return None
+        first_edge, first_weight = first["edge_index"], first["weight"]
+        second_edge, second_weight = second["edge_index"], second["weight"]
+        rows, cols, weights = [], [], []
+        for edge_index in range(second_edge.shape[1]):
+            syntax_parent = second_edge[1, edge_index]
+            matches = torch.nonzero(first_edge[0] == syntax_parent, as_tuple=False).reshape(-1)
+            if matches.numel() == 0:
+                continue
+            rows.append(second_edge[0, edge_index].expand(matches.numel()))
+            cols.append(first_edge[1, matches])
+            weights.append(second_weight[edge_index] * first_weight[matches])
+        if not rows:
+            return None
+        return {
+            "edge_index": torch.stack([torch.cat(rows), torch.cat(cols)], dim=0),
+            "weight": torch.cat(weights),
+        }
+
     def _hierarchy_contexts(
         self,
         lows: Mapping[str, torch.Tensor],
         temporal_embeddings: Mapping[str, torch.Tensor],
         parents: Mapping[str, torch.Tensor],
+        operators: Mapping[str, Mapping[str, torch.Tensor]] | None = None,
     ) -> dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
         road_to_syntax = parents.get("road_to_syntax")
         syntax_to_region = parents.get("syntax_to_region")
+        road_to_syntax_operator = (operators or {}).get("road_to_syntax")
+        syntax_to_region_operator = (operators or {}).get("syntax_to_region")
         syntax_region_low = self._aggregate_parent(
-            lows["region"], lows["syntax"].shape[1], syntax_to_region
+            lows["region"], lows["syntax"].shape[1], syntax_to_region, syntax_to_region_operator
         )
         syntax_region_time = self._aggregate_parent(
-            temporal_embeddings["region"], lows["syntax"].shape[1], syntax_to_region
+            temporal_embeddings["region"], lows["syntax"].shape[1], syntax_to_region, syntax_to_region_operator
         )
         road_syntax_low = self._aggregate_parent(
-            lows["syntax"], lows["road"].shape[1], road_to_syntax
+            lows["syntax"], lows["road"].shape[1], road_to_syntax, road_to_syntax_operator
         )
         road_syntax_time = self._aggregate_parent(
-            temporal_embeddings["syntax"], lows["road"].shape[1], road_to_syntax
+            temporal_embeddings["syntax"], lows["road"].shape[1], road_to_syntax, road_to_syntax_operator
         )
         road_region_index = self._compose_parent_indices(road_to_syntax, syntax_to_region)
+        road_region_operator = self._compose_parent_operators(
+            road_to_syntax_operator, syntax_to_region_operator
+        )
         road_region_low = self._aggregate_parent(
-            lows["region"], lows["road"].shape[1], road_region_index
+            lows["region"], lows["road"].shape[1], road_region_index,
+            road_region_operator,
         )
         road_region_time = self._aggregate_parent(
-            temporal_embeddings["region"], lows["road"].shape[1], road_region_index
+            temporal_embeddings["region"], lows["road"].shape[1], road_region_index,
+            road_region_operator,
         )
         return {
             "region": {},
@@ -397,23 +484,30 @@ class HierarchicalThreeLayerRAG(nn.Module):
         retrieved_times: Mapping[str, torch.Tensor],
         lows: Mapping[str, torch.Tensor],
         parents: Mapping[str, torch.Tensor],
+        operators: Mapping[str, Mapping[str, torch.Tensor]] | None = None,
     ) -> dict[str, torch.Tensor]:
         if layer == "region":
             return {}
         output: dict[str, torch.Tensor] = {}
         if layer == "syntax":
             output["region"] = self._aggregate_parent(
-                retrieved_times["region"], lows["syntax"].shape[1], parents.get("syntax_to_region")
+                retrieved_times["region"], lows["syntax"].shape[1], parents.get("syntax_to_region"),
+                (operators or {}).get("syntax_to_region"),
             )
             return output
         output["syntax"] = self._aggregate_parent(
-            retrieved_times["syntax"], lows["road"].shape[1], parents.get("road_to_syntax")
+            retrieved_times["syntax"], lows["road"].shape[1], parents.get("road_to_syntax"),
+            (operators or {}).get("road_to_syntax"),
         )
         region_index = self._compose_parent_indices(
             parents.get("road_to_syntax"), parents.get("syntax_to_region")
         )
         output["region"] = self._aggregate_parent(
-            retrieved_times["region"], lows["road"].shape[1], region_index
+            retrieved_times["region"], lows["road"].shape[1], region_index,
+            self._compose_parent_operators(
+                (operators or {}).get("road_to_syntax"),
+                (operators or {}).get("syntax_to_region"),
+            ),
         )
         return output
 
@@ -475,7 +569,11 @@ class HierarchicalThreeLayerRAG(nn.Module):
                 for layer in LAYER_NAMES
             }
             raw_temporals = {
-                layer: snapshot.temporal_features[layer].unsqueeze(0).to(device)
+                layer: snapshot.history_temporal_features[layer].unsqueeze(0).to(device)
+                for layer in LAYER_NAMES
+            }
+            value_temporals = {
+                layer: snapshot.value_features[layer].unsqueeze(0).to(device)
                 for layer in LAYER_NAMES
             }
             snapshot_lengths = {int(raw_temporals[layer].shape[3]) for layer in LAYER_NAMES}
@@ -492,7 +590,14 @@ class HierarchicalThreeLayerRAG(nn.Module):
                     "syntax_to_region": (lows["syntax"].shape[1], lows["region"].shape[1]),
                 },
             )
-            contexts = self._hierarchy_contexts(lows, temporal_embeddings, parents)
+            operators = self._batch_operators(
+                snapshot.parent_operator, lows["road"].device,
+                expected_sizes={
+                    "road_to_syntax": (lows["road"].shape[1], lows["syntax"].shape[1]),
+                    "syntax_to_region": (lows["syntax"].shape[1], lows["region"].shape[1]),
+                },
+            )
+            contexts = self._hierarchy_contexts(lows, temporal_embeddings, parents, operators)
             calendar = {name: snapshot.calendar.get(name, 0) for name in ("month", "weekday", "start_hour", "holiday")}
             calendar_tensor = self.calendar_encoder(calendar, 1, lows["road"].device)
             for layer in LAYER_NAMES:
@@ -511,7 +616,7 @@ class HierarchicalThreeLayerRAG(nn.Module):
                         # Keep source keys attached to the current encoder
                         # graph so key projections/temporal encoders train.
                         key=key[node],
-                        value=raw_temporals[layer][0, node].detach(),
+                        value=value_temporals[layer][0, node].detach(),
                         temporal_embedding=temporal_embeddings[layer][0, node].detach(),
                     ))
         if len(source_lengths) != 1:
@@ -611,10 +716,13 @@ class HierarchicalThreeLayerRAG(nn.Module):
             city_from_input = low_features.city_id
             if temporal_features is not None or calendar is not None or parent_index is not None:
                 raise ValueError("RAG ThreeLayerRAGInputs 不应再重复提供 temporal/calendar/parent")
-            temporal_features = low_features.temporal_features
+            temporal_features = low_features.history_temporal_features
             calendar = low_features.calendar
             parent_index = low_features.parent_index
+            parent_operator = low_features.parent_operator
             low_features = low_features.low_features
+        else:
+            parent_operator = None
         if low_features is None or temporal_features is None or calendar is None:
             raise ValueError("RAG 需要三层 low_features、temporal_features 和 calendar")
         if city_from_input is not None and target_city is None:
@@ -631,6 +739,13 @@ class HierarchicalThreeLayerRAG(nn.Module):
                 "syntax_to_region": (lows["syntax"].shape[1], lows["region"].shape[1]),
             },
         )
+        operators = self._batch_operators(
+            parent_operator, device,
+            expected_sizes={
+                "road_to_syntax": (lows["road"].shape[1], lows["syntax"].shape[1]),
+                "syntax_to_region": (lows["syntax"].shape[1], lows["region"].shape[1]),
+            },
+        )
         temporal_embeddings = {
             layer: self.temporal_encoders[layer](raw_temporals[layer]) for layer in LAYER_NAMES
         }
@@ -639,11 +754,11 @@ class HierarchicalThreeLayerRAG(nn.Module):
             layer: calendar_embedding[:, None].expand(-1, lows[layer].shape[1], -1)
             for layer in LAYER_NAMES
         }
-        contexts = self._hierarchy_contexts(lows, temporal_embeddings, parents)
+        contexts = self._hierarchy_contexts(lows, temporal_embeddings, parents, operators)
         active_memory = memory or self.memory
         if active_memory is None:
             raise RuntimeError("严格模式: RAG 尚未设置 source-train memory")
-        active_memory.validate()
+        active_memory.validate(self.expected_graph_identity)
         query_length = int(raw_temporals["region"].shape[3])
         source_entries = self._source_entries(active_memory, expected_length=query_length)
 
@@ -654,7 +769,9 @@ class HierarchicalThreeLayerRAG(nn.Module):
         query_keys: dict[str, torch.Tensor] = {}
         # Region -> Syntax -> Road is deliberate coarse-to-fine ordering.
         for layer in ("region", "syntax", "road"):
-            parent_refs = self._parent_reference_times(layer, retrieved_times, lows, parents)
+            parent_refs = self._parent_reference_times(
+                layer, retrieved_times, lows, parents, operators
+            )
             branch_input = self._branch_input(
                 layer, lows, temporal_embeddings, calendar_nodes[layer], contexts, parent_refs
             )

@@ -6,7 +6,7 @@ static_structure_mode: three_layer
 
 rag:
   name: three_layer_hierarchical_rag
-  contract_version: three-layer-hierarchical-rag-v1
+  contract_version: three-layer-hierarchical-rag-v2
   low_dim: 128                         # Stage-2 H_*_low hidden dimension
   seq_length: 24
   temporal_channels:
@@ -27,6 +27,8 @@ rag:
   temperature: 1.0
   match_month: true
   match_holiday: false
+  require_value_separation: true
+  require_graph_identity: true
 
 data:
   source_cities:
@@ -38,7 +40,7 @@ data:
   spectral_feature_dir: outputs/stage2_three_layer_graphgps_lappe/spectral_features
   temporal_feature_dir: data
   # 由 scripts/build_rag_memory.py 生成的本地 memory；不纳入版本控制。
-  memory_path: outputs/stage3_three_layer_rag/rag_memory_v1.pt
+  memory_path: outputs/stage3_three_layer_rag/rag_memory_v2.pt
   input_manifest: null
 
 hierarchy:
