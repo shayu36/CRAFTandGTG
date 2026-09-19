@@ -39,6 +39,9 @@ data:
   # Stage-2 低频输出的本地目录；运行时由导出 manifest 指向具体文件。
   spectral_feature_dir: outputs/stage2_three_layer_graphgps_lappe/spectral_features
   temporal_feature_dir: data
+  # 由 scripts/build_three_layer_rag_snapshots.py 生成；直接可供 build_rag_memory.py 读取。
+  dynamic_snapshot_bundle: outputs/stage3_three_layer_rag/train_snapshots.pt
+  dynamic_normalizer: outputs/stage3_three_layer_rag/train_snapshots.normalizer.json
   # 由 scripts/build_rag_memory.py 生成的本地 memory；不纳入版本控制。
   memory_path: outputs/stage3_three_layer_rag/rag_memory_v2.pt
   input_manifest: null

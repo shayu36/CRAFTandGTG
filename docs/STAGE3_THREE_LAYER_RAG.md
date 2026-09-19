@@ -78,6 +78,63 @@ python scripts/build_rag_memory.py \
   --require-graph-identity
 ```
 
+## 从本地 GTG 三城生成真实动态 snapshot
+
+`scripts/build_three_layer_rag_snapshots.py` 是 Road/Syntax 动态序列的正式入口。
+它读取带时间戳的 `traj/train.csv`、`traj/test.csv` 和固定 Road 顺序的
+`map/road.csv`：Road 的三个通道依次为 `passage_count`、`speed_kmh`、
+`travel_time_seconds`；Syntax 使用静态缓存中 **row=Syntax, col=Road** 的
+`road_to_syntax_weight` 作加权均值；Region 默认使用原始已观测
+`hourly_boundary_flow_raw.csv` 的 `in_flow/out_flow`。因此该过程不会
+把 Region 流量伪装成 Road 或 Syntax 动态数据。
+
+先导出 Stage 2 v2 低频特征，随后构建 source-train bundle：
+
+```bash
+python scripts/build_three_layer_rag_snapshots.py \
+  --cities beijing chengdushi xianshi \
+  --hierarchy-cache-dir cache/static_hierarchy_start_v2 \
+  --spectral-feature-dir outputs/stage2_three_layer_graphgps_lappe/spectral_features \
+  --gtg-data-root data \
+  --region-flow-root data/gtg_craft \
+  --region-flow-file-name hourly_boundary_flow_raw.csv \
+  --output outputs/stage3_three_layer_rag/train_snapshots.pt \
+  --splits train \
+  --history-length 24 \
+  --value-length 24 \
+  --snapshot-stride-hours 24
+
+python scripts/build_rag_memory.py \
+  --input outputs/stage3_three_layer_rag/train_snapshots.pt \
+  --output outputs/stage3_three_layer_rag/rag_memory_v2.pt \
+  --source-cities beijing chengdushi xianshi \
+  --require-graph-identity
+```
+
+每个 snapshot 的 Query/Key 历史窗口为 `[t-24,t)`，被检索 Value 为独立的
+未来窗口 `[t,t+24)`；跨越 train/valid 边界的窗口被丢弃。默认使用只在 source
+train 时间范围拟合的 `log1p_zscore`，并在 bundle 同目录写出 normalizer JSON。
+对被留出的目标城市必须传入这个 source-only JSON：
+
+```bash
+python scripts/build_three_layer_rag_snapshots.py \
+  --cities target_city \
+  --hierarchy-cache-dir cache/static_hierarchy_start_v2 \
+  --spectral-feature-dir outputs/stage2_three_layer_graphgps_lappe/spectral_features \
+  --output /local/path/target_test_snapshots.pt \
+  --normalizer-in outputs/stage3_three_layer_rag/train_snapshots.normalizer.json \
+  --splits test
+```
+
+GTG 的 `train_label.csv` / `valid_label.csv` 目前只有 `time_index=0..23` 的
+hour-of-day 汇总，并非带日期的 720 小时观测，不能单独重建动态序列。默认不把它
+广播到历史窗口。仅在实验协议允许完整时段汇总先验时，才可显式追加
+`--label-fill-mode hour_of_day_prior`，该模式会在 metadata 中记录潜在泄漏风险。
+
+若实验明确复用 CRAFT 的内部零值插值，可将
+`--region-flow-file-name hourly_boundary_flow_interpolated.csv` 显式传入；它
+可能使历史小时依赖后续观测，不能作为严格因果预测实验的默认输入。
+
 真实 CSV、`cache/`、谱特征、memory 和 checkpoint 不提交到 Git。输入 bundle
 的格式是 `ThreeLayerRAGInputs` 字段；它可以由本地 Stage 2 输出、道路动态
 聚合和 Region flow loader 共同构成。Stage 2 v2 文件可以通过
@@ -88,7 +145,7 @@ python scripts/build_rag_memory.py \
 
 ```bash
 python scripts/build_three_layer_rag_input.py \
-  --spectral-feature outputs/stage2_three_layer_graphgps_lappe/spectral_features/beijing.pt \
+  --spectral-feature outputs/stage2_three_layer_graphgps_lappe/spectral_features/beijing_spectral_features.pt \
   --hierarchy-cache-dir cache/static_hierarchy_start_v2 \
   --city beijing \
   --history /local/path/beijing_history_temporal.pt \

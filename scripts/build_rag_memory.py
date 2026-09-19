@@ -24,7 +24,10 @@ from three_layer_rag import ThreeLayerRAGInputs, ThreeLayerRAGMemory
 
 
 def _load_snapshots(path: Path) -> list[ThreeLayerRAGInputs]:
-    payload = torch.load(path, map_location="cpu")
+    # Snapshot bundles deliberately contain ThreeLayerRAGInputs dataclasses,
+    # not only tensor weights.  Be explicit for PyTorch versions whose
+    # weights_only default changed.
+    payload = torch.load(path, map_location="cpu", weights_only=False)
     if isinstance(payload, dict) and "snapshots" in payload:
         payload = payload["snapshots"]
     if not isinstance(payload, (list, tuple)):
