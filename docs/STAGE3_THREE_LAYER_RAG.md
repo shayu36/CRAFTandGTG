@@ -1,8 +1,8 @@
 # Stage 3 三层 Hierarchical RAG
 
-本模块位于联合三层 GraphGPS 之后、Flow Matching 之前。它只接收
+本模块位于联合三层 GraphGPS 之后、Hierarchical Conditional Diffusion 之前。它只接收
 GraphGPS 的三层低频表征、历史可观测的三层动态时间序列和日历条件；高频表征保留给
-后续 Flow Matching。
+后续 Conditional Diffusion。
 
 ## 输入契约
 
@@ -184,14 +184,16 @@ GraphGPS checkpoint 或节点顺序。
 聚合，不能用 Region flow 代替。当前仓库中 `norm_flow` 主要是 Region 级
 `in_flow/out_flow`，不是现成的 Road/Syntax 序列。
 
-## 与 Flow Matching 的边界
+## 与 Conditional Diffusion 的边界
 
 RAG 输出 `R_road/R_syntax/R_region` 与三层高频特征分别交给后续层：
 
 ```text
-R_road/R_syntax/R_region + calendar ─┐
-H_road_high/H_syntax_high/H_region_high ─┼─> Hierarchical Flow Matching
+R_road/R_syntax/R_region + calendar ──────┐
+H_road_high/H_syntax_high/H_region_high ──┼─> Hierarchical Conditional Diffusion
+父层生成/teacher-forced future ───────────┘
 ```
 
-本模块不实现 Flow Matching，也不修改旧 HCFM 的 Region-only 入口；
-`src/hcfm/rag.py` 仅导出新类以便后续接入，同时保留旧兼容检索器。
+RAG 的三层 low/history 条件与 Diffusion 的三层 high 条件严格分开。正式联合训练由
+`scripts/train_three_layer_diffusion.py` 执行，Diffusion noise loss 会回传到 RAG 的
+query/key/temporal encoder。旧 `src/hcfm/` 仅保留为 legacy 独立实验路线。

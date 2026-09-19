@@ -1,7 +1,7 @@
 """Joint-training and checkpoint utilities for the three-layer RAG.
 
-RAG has no independent future-flow label objective here.  The downstream
-Flow-Matching objective is supplied as ``objective(output)`` so retrieval
+RAG has no independent future-flow label objective here.  A downstream
+conditional-Diffusion objective may be supplied as ``objective(output)`` so retrieval
 parameters are trained without inventing a Region-only surrogate target.
 """
 
@@ -19,7 +19,7 @@ RAG_CHECKPOINT_VERSION = "three-layer-rag-checkpoint-v1"
 
 
 class RAGTrainer:
-    """A small optimizer wrapper intended for joint FM/RAG training."""
+    """Legacy generic wrapper; Stage 4 uses joint Diffusion/RAG training."""
 
     def __init__(self, model: torch.nn.Module, optimizer: torch.optim.Optimizer):
         self.model = model
@@ -101,4 +101,3 @@ def load_rag_checkpoint(
     if optimizer is not None and payload.get("optimizer_state") is not None:
         optimizer.load_state_dict(payload["optimizer_state"])
     return dict(payload)
-

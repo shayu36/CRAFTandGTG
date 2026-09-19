@@ -1,9 +1,9 @@
 """Hierarchical three-layer retrieval augmented generation.
 
-This module is intentionally independent from Flow Matching.  It produces
+This module is intentionally independent from the downstream generator.  It produces
 ``R_region``, ``R_syntax`` and ``R_road`` references from source-city train
 memory.  Stage-2 high-frequency features are rejected at the public boundary;
-they belong to the later Flow Matching condition.
+they belong to the later conditional Diffusion condition.
 """
 
 from __future__ import annotations

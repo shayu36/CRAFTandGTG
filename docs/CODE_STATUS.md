@@ -1,14 +1,15 @@
 # 当前代码状态
 
 > 状态日期：2026-09-19  
-> 当前基线提交：`b7c52a3`（本地仍有本轮三层动态序列构建相关修改待提交）
+> 本轮实现基线提交：`0153556c878bbc6d5d0bf77fe856b67409d920da`（`RAG`）
+> 当前工作区包含尚未提交的 Stage 4 Conditional Diffusion 改造。
 
 ## 1. 总体架构
 
 当前仓库同时保留两条彼此独立的路线：
 
-1. 新三层路线：`Static hierarchy → Unified GraphGPS → Hierarchical RAG → Hierarchical Flow Matching`；
-2. 旧 HCFM 路线：`src/hcfm/` 与 `scripts/run_stage2.py`。
+1. 当前正式新三层路线：`Static hierarchy → Unified GraphGPS → Hierarchical RAG → Hierarchical Conditional Diffusion`；
+2. legacy HCFM/FM 路线：`src/hcfm/` 与 `scripts/run_stage2.py`。
 
 本轮工作只扩展新三层路线，没有把联合 GraphGPS 或新 RAG 静默接入旧 HCFM。
 
@@ -25,7 +26,7 @@ H_*_low                              H_*_high
    ↓                                     ↓
 Hierarchical RAG ── R_road/R_syntax/R_region
                     ↓
-      Region → Syntax → Road Flow Matching
+  Region → Syntax → Road Conditional Diffusion
 ```
 
 ## 2. Stage 1：三层静态层级图
@@ -125,7 +126,8 @@ three-layer-joint-graphgps-spectral-features-v2
 
 ## 4. Stage 3：三层 Hierarchical RAG
 
-状态：**输入契约、模型、真实动态构建、memory 和基础 checkpoint 工具已实现；完整训练调用链尚未完成**。
+状态：**输入契约、模型、真实动态构建和 memory 已实现；RAG 已接入 Stage 4
+Diffusion loss 的联合训练调用链。RAG 不使用独立的 Region-only surrogate objective。**
 
 核心代码：
 
@@ -183,19 +185,55 @@ Syntax 使用 Region 上下文；Road 使用 Syntax 和 Region 上下文。跨�
 没有日期。默认不会把它们广播成历史序列；只有显式启用
 `--label-fill-mode hour_of_day_prior` 才作为稀疏先验使用，并记录潜在泄漏风险。
 
-## 5. 尚未完成的核心代码
+## 5. Stage 4：Hierarchical Conditional Diffusion
 
-以下部分不能写成已完成：
+状态：**代码、配置、训练/生成 CLI 和 synthetic 测试已实现；尚未执行真实三城训练。**
 
-1. 没有正式的 RAG + 三层 Flow Matching 联合训练 CLI；
-2. `RAGTrainer` 只是接受下游 objective 的训练工具，不是完整训练程序；
-3. `query_three_layer_rag.py` 当前会新建 RAG 模型，没有加载已训练 RAG checkpoint；
-4. `R_road/R_syntax/R_region` 尚未接入新的 Region→Syntax→Road Flow Matching；
-5. Stage 2 高频特征与 RAG reference 的联合条件接口尚未闭合；
-6. 尚无联合 RAG/FM checkpoint、验证指标和生成结果；
-7. 旧 `src/hcfm/` 仍是独立路线，不能当作新三层 FM 已完成的证据。
+核心实现：
 
-因此，当前正确的代码完成度是：
+```text
+src/three_layer_diffusion/gaussian_diffusion.py
+src/three_layer_diffusion/unet.py
+src/three_layer_diffusion/conditioning.py
+src/three_layer_diffusion/model.py
+src/three_layer_diffusion/data.py
+src/three_layer_diffusion/training.py
+src/three_layer_diffusion/metrics.py
+configs/stage4_three_layer_diffusion.yaml
+scripts/train_three_layer_diffusion.py
+scripts/generate_three_layer_diffusion.py
+```
+
+实际接线为：
+
+```text
+三层 H_low + history + calendar → Hierarchical RAG
+R_* + 三层 H_high + calendar + 父层动态 → Conditional Diffusion
+diffusion epsilon loss → 同时更新 RAG query/key/temporal encoder 和三层 U-Net
+```
+
+三个节点共享的 1D 专家通道为 Region=2、Syntax=3、Road=3。节点维从
+`[B,N,C,T]` reshape 为 `[B*N,C,T]`，U-Net 注意力只沿短时间轴 `T` 执行，不构建
+Road `M×M` 矩阵。beta/alpha/posterior 均注册为 buffer；支持 DDPM、DDIM、
+self-conditioning 和 EMA。默认 `clip_x0=false`，物理空间恢复使用现有
+`log1p_zscore` normalizer，而不是 CRAFT 的 `(x+1)/2`。
+
+层次条件严格使用静态稀疏算子的转置语义：
+
+```text
+syntax_to_region: Region future → Syntax condition
+road_to_syntax:   Syntax future → Road condition
+```
+
+每个 child 的入边权重重新归一化。训练时 Syntax/Road 分别读取真实归一化父层
+future（teacher forcing）；推理时只读取上一级完整生成结果，且生成入口会先移除
+target snapshot 的 `value_temporal_features`。
+
+checkpoint 保存 RAG、三层 Diffusion、EMA、optimizer/scheduler、epoch/step、完整
+配置、随机种子，并绑定 GraphGPS fingerprint、三城 graph hash、feature version、
+RAG memory version 和 normalizer fingerprint。
+
+当前正确的完成度是：
 
 | 模块 | 状态 |
 |---|---|
@@ -206,11 +244,13 @@ Syntax 使用 Region 上下文；Road 使用 Syntax 和 Region 上下文。跨�
 | Hierarchical RAG 输入契约与模型 | 已完成 |
 | source-train RAG memory | 已完成 |
 | val/test RAG snapshots | 已完成 |
-| RAG 独立正式训练入口 | 未完成 |
-| RAG → 三层 Flow Matching | 未完成 |
-| 新三层端到端生成闭环 | 未完成 |
+| RAG + 三层 Diffusion 正式训练入口 | 已实现，未真实训练 |
+| RAG → Region→Syntax→Road Diffusion | 已实现，synthetic smoke 通过 |
+| DDPM/DDIM、self-conditioning、EMA/checkpoint | 已实现，单元测试通过 |
+| 真实三城 Stage 4 checkpoint/生成指标 | 未运行 |
+| Diffusion → GTG 轨迹解码 | 未接入 |
 
-## 6. 下一阶段接口要求
+## 6. 正式训练与生成接口
 
 后续实现必须使用以下本地产物：
 
@@ -221,12 +261,12 @@ outputs/stage3_three_layer_rag/eval_snapshots.pt
 outputs/stage3_three_layer_rag/rag_memory_v2.pt
 ```
 
-联合训练应满足：
+联合训练已经按以下契约实现：
 
 ```text
 三层 low + 三层 history + calendar → RAG
-RAG references + 三层 high + calendar → Hierarchical Flow Matching
-FM objective → 同时更新 RAG 与 FM
+RAG references + 三层 high + calendar + 父层动态 → Hierarchical Conditional Diffusion
+三层 epsilon objective → 同时更新 RAG 与 Diffusion
 ```
 
 训练 checkpoint 至少应绑定：
@@ -236,12 +276,30 @@ FM objective → 同时更新 RAG 与 FM
 - spectral feature version；
 - RAG memory version 和 graph identity；
 - dynamic normalizer fingerprint；
-- RAG/FM 配置与训练步数。
+- Diffusion contract、完整配置与训练步数。
+
+命令：
+
+```bash
+python scripts/train_three_layer_diffusion.py \
+  --config configs/stage4_three_layer_diffusion.yaml \
+  --device cuda:0
+
+python scripts/generate_three_layer_diffusion.py \
+  --config configs/stage4_three_layer_diffusion.yaml \
+  --checkpoint outputs/stage4_three_layer_diffusion/best.pt \
+  --input outputs/stage3_three_layer_rag/eval_snapshots.pt \
+  --output outputs/stage4_three_layer_diffusion/generated \
+  --device cuda:0
+```
 
 ## 7. 已知环境风险
 
 当前环境导入 PyG 时会报告 `torch-scatter`、`torch-cluster`、
 `torch-spline-conv` 和 `torch-sparse` 的二进制符号不匹配。这些扩展在当前联合
-GraphGPS、动态构建和 RAG memory 路径中被 PyG 禁用后仍能运行，但后续新 FM 若
-直接依赖这些扩展，需要安装与当前 PyTorch/CUDA 完全匹配的 wheel。
+GraphGPS、动态构建和 RAG memory 路径中被 PyG 禁用后仍能运行。Stage 4 的
+Diffusion U-Net 本身不依赖这些扩展，但导入上游 RAG 包时仍会显示这些 warning。
 
+另一个实际风险是现有 RAG source memory 按 snapshot/node 在线重算 key；三城正式
+训练的吞吐和显存尚未基准测试。当前实现语义完整，但在开始长训练前应先执行少量
+snapshot 的 GPU 性能烟雾测试，再决定是否增加无泄漏的 key cache/分块检索。

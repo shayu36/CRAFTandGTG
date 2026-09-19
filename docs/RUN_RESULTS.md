@@ -2,7 +2,7 @@
 
 > 结果日期：2026-09-19  
 > 数据范围：Beijing、Chengdushi、Xianshi 三个本地 GTG 城市数据集  
-> 说明：以下仅记录真实执行过并已落盘/校验的结果，不包含尚未运行的 RAG/FM 指标。
+> 说明：以下仅记录真实执行过并已落盘/校验的结果，不包含尚未运行的 Stage 4 RAG/Diffusion 真实指标。
 
 ## 1. 输入数据和静态层级规模
 
@@ -215,17 +215,44 @@ require_graph_identity = true
 
 ## 7. 已运行测试
 
+Stage 4 Conditional Diffusion 新增测试：
+
+```text
+pytest -q tests/test_three_layer_diffusion.py
+→ 19 passed, 4 warnings
+```
+
+覆盖 CRAFT schedule、buffer/q_sample、三层通道、节点 reshape、RAG/high 条件、
+频带隔离、稀疏父子广播、mask loss、层间 loss 尺度、LOCO、DDPM/DDIM、确定性
+DDIM、self-conditioning、RAG 梯度、EMA/checkpoint、normalizer、无 Road 稠密注意力、
+stable node order 和完整三层 synthetic generation。
+
 三层动态、RAG 和 Stage 2 定向回归测试：
 
 ```text
 31 passed, 4 warnings
 ```
 
-修复 `valid → val` 契约后的最新动态/RAG 定向测试：
+除 `tests/test_dual_graph.py` 外的仓库全量测试：
 
 ```text
-12 passed, 4 warnings
+pytest -q --ignore=tests/test_dual_graph.py
+→ 176 passed, 14 warnings
 ```
+
+不跳过时，`pytest -q` 在收集 `tests/test_dual_graph.py` 阶段失败，准确错误为：
+
+```text
+ImportError: .../graph_tool/libgraph_tool_core.so:
+version `GOMP_5.0' not found
+```
+
+这是当前 `graph_tool` 与 PyTorch 自带 `libgomp` 的 ABI 环境问题，测试尚未进入执行，
+不是 Diffusion 代码断言失败。
+
+此外已对真实本地产物执行只读契约检查：69 个 train snapshots、18 个 eval snapshots、
+69 个 RAG memory snapshots、三城 Stage-2 high/low stable order、graph hash、GraphGPS
+fingerprint 和 normalizer fingerprint 全部一致。该检查没有运行训练或生成。
 
 四个 warning 均来自当前 PyTorch 与 PyG 可选二进制扩展的符号不匹配：
 
@@ -245,11 +272,11 @@ memory 验证均成功完成，因此这些 warning 不是本轮失败项。
 
 - 训练后的 Hierarchical RAG checkpoint；
 - RAG 检索质量指标；
-- RAG 与三层 Flow Matching 联合训练指标；
+- RAG 与三层 Conditional Diffusion 联合训练指标；
 - Region→Syntax→Road 生成指标；
 - 新三层路线的最终端到端生成样本；
-- RAG/FM GPU 训练结果。
+- RAG/Diffusion GPU 训练结果。
 
-原因是正式的 RAG + Hierarchical Flow Matching 训练入口尚未接通，而不是本地
-真实数据缺失。
-
+Stage 4 正式代码入口已经接通，但尚未执行耗时的真实三城训练；因此没有训练后的
+checkpoint 或真实生成指标。这是“尚未运行”，不是本地真实数据缺失，也不是把
+synthetic smoke test 当成城市生成结果。

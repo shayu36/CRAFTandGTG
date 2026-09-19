@@ -135,10 +135,10 @@ concat(H_region_low, H_region_high)
 三层 H_low + source 时间序列特征
   → Stage 3 RAG retrieval
   → retrieved dynamic context
-  → Hierarchical Flow Matching input/context
+  → Hierarchical Conditional Diffusion retrieval context
 
 三层 H_high
-  → Hierarchical Flow Matching target-specific condition
+  → Hierarchical Conditional Diffusion target-specific condition
 ```
 
 低频表示跨城市相对共享的平滑功能结构和宏观共性；高频保留城市局部结构、边界
@@ -216,7 +216,7 @@ pytest -q
 - 显式 high/low spectral filtering loss；
 - high/low transfer loss；
 - RAG；
-- Hierarchical Flow Matching；
+- Hierarchical Conditional Diffusion（由 Stage 4 实现）；
 - 正式 target 训练；
 - 完整 CoSpec dual-path/prototype 模块。
 

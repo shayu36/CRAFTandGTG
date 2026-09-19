@@ -2,8 +2,8 @@
 
 本仓库研究跨城市交通表征与生成，当前重点路线是把 Road、Syntax/Locality、
 Region 组成统一三层异构层次图，使用单一 GraphGPS 编码器联合建模，再以低频
-表征驱动 Hierarchical RAG、以高频表征作为后续 Hierarchical Flow Matching 的
-城市特异条件。
+表征驱动 Hierarchical RAG、以高频表征作为 Hierarchical Conditional Diffusion
+的城市特异条件，并按 Region → Syntax → Road 生成三层未来动态。
 
 ## 当前状态
 
@@ -18,8 +18,9 @@ Region 组成统一三层异构层次图，使用单一 GraphGPS 编码器联合
 | Road/Syntax/Region 真实动态序列构建 | 已完成 |
 | Hierarchical RAG 数据契约、模型和 memory | 已完成 |
 | Train/val/test RAG snapshots | 已完成 |
-| RAG + Hierarchical Flow Matching 联合训练 | 尚未完成 |
-| 新三层端到端生成闭环 | 尚未完成 |
+| RAG + Hierarchical Conditional Diffusion 代码与 CLI | 已完成（单元/synthetic smoke） |
+| Stage 4 真实三城训练与生成指标 | 尚未运行 |
+| 后续 GTG 轨迹解码闭环 | 尚未接入 |
 
 详细状态与真实运行结果分别见：
 
@@ -45,7 +46,7 @@ Hierarchical RAG                          │
         ↓                                 │
 R_region / R_syntax / R_road ─────────────┘
                          ↓
-           Region → Syntax → Road Flow Matching
+       Region → Syntax → Road Conditional Diffusion
 ```
 
 联合图节点编号固定为：
@@ -65,17 +66,21 @@ Region: [M+K, M+K+N)
 src/static_hierarchy/       三层静态图、跨层算子和缓存契约
 src/three_layer_graphgps/   联合 GraphGPS、LapPE、频率分解与 Stage 2 engine
 src/three_layer_rag/        三层 RAG、动态序列、memory、I/O 和训练工具
-src/hcfm/                   旧 HCFM 独立路线
+src/three_layer_diffusion/  三层条件 Diffusion、U-Net、EMA、数据与指标
+src/hcfm/                   legacy HCFM/FM 独立实验路线（非当前主路线）
 
 scripts/build_static_hierarchy.py
 scripts/train_three_layer_graphgps.py
 scripts/build_three_layer_rag_snapshots.py
 scripts/build_rag_memory.py
 scripts/query_three_layer_rag.py
+scripts/train_three_layer_diffusion.py
+scripts/generate_three_layer_diffusion.py
 
 configs/stage1_three_layer_static.yaml
 configs/stage2_three_layer_graphgps_lappe.yaml
 configs/stage3_three_layer_rag.yaml
+configs/stage4_three_layer_diffusion.yaml
 ```
 
 ## 三层特征契约
@@ -172,6 +177,29 @@ python scripts/build_rag_memory.py \
   --require-graph-identity
 ```
 
+### Stage 4 联合训练
+
+```bash
+python scripts/train_three_layer_diffusion.py \
+  --config configs/stage4_three_layer_diffusion.yaml \
+  --device cuda:0
+```
+
+### Stage 4 分层生成
+
+```bash
+python scripts/generate_three_layer_diffusion.py \
+  --config configs/stage4_three_layer_diffusion.yaml \
+  --checkpoint outputs/stage4_three_layer_diffusion/best.pt \
+  --input outputs/stage3_three_layer_rag/eval_snapshots.pt \
+  --output outputs/stage4_three_layer_diffusion/generated \
+  --device cuda:0
+```
+
+Stage 4 训练时用真实归一化父层 future 作 teacher forcing；推理时严格先生成
+Region，再把生成 Region 稀疏广播给 Syntax，最后把生成 Syntax 广播给 Road。
+生成条件不读取真实 `value_temporal_features`，该字段仅可在采样完成后计算离线指标。
+
 ## 文档索引
 
 - [当前代码状态](docs/CODE_STATUS.md)
@@ -183,19 +211,20 @@ python scripts/build_rag_memory.py \
 - [Stage 1 测试报告](docs/STAGE1_THREE_LAYER_STATIC_TEST_REPORT.md)
 - [Stage 2 联合 GraphGPS + LapPE](docs/STAGE2_THREE_LAYER_GRAPHGPS_LAPPE.md)
 - [Stage 3 Hierarchical RAG](docs/STAGE3_THREE_LAYER_RAG.md)
+- [Stage 4 Hierarchical Conditional Diffusion](docs/STAGE4_THREE_LAYER_DIFFUSION.md)
 
 ## 下一步
 
-下一阶段不是继续生成同类数据，而是补齐正式联合训练入口：
+Stage 4 的代码、配置、CLI 和 synthetic 测试已经落地，下一步是执行真实三城训练：
 
 ```text
-RAG references + Stage 2 high-frequency features + calendar
+RAG references + Stage 2 high-frequency features + calendar + parent dynamics
                          ↓
-Region → Syntax → Road Hierarchical Flow Matching
+Region → Syntax → Road Hierarchical Conditional Diffusion
                          ↓
-joint FM objective / checkpoint / validation / test
+joint diffusion noise objective / EMA checkpoint / physical-space validation
 ```
 
-在该入口完成以前，`scripts/query_three_layer_rag.py` 不应被当作正式推理命令，
-因为它当前会创建尚未训练的 RAG 参数。
-
+当前没有运行真实 Stage 4 重训练，因此仓库尚无训练后的 `best.pt` 或真实三城生成
+指标。`scripts/query_three_layer_rag.py` 仍只是独立调试入口；正式生成必须使用联合
+训练 checkpoint 和 `scripts/generate_three_layer_diffusion.py`。

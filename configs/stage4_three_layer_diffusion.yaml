@@ -1,0 +1,110 @@
+# Stage 4: Hierarchical RAG + Region -> Syntax -> Road Conditional Diffusion.
+# Real tensors/checkpoints remain local and are not committed to Git.
+
+static_structure_mode: three_layer
+seed: 2026
+
+data:
+  source_cities: [beijing, chengdushi, xianshi]
+  spectral_feature_dir: outputs/stage2_three_layer_graphgps_lappe/spectral_features
+  train_snapshots: outputs/stage3_three_layer_rag/train_snapshots.pt
+  eval_snapshots: outputs/stage3_three_layer_rag/eval_snapshots.pt
+  rag_memory: outputs/stage3_three_layer_rag/rag_memory_v2.pt
+  dynamic_normalizer: outputs/stage3_three_layer_rag/train_snapshots.normalizer.json
+  train_splits: [train]
+  validation_splits: [val]
+  generation_splits: [val, test]
+
+rag:
+  contract_version: three-layer-hierarchical-rag-v2
+  low_dim: 128
+  seq_length: 24
+  temporal_channels:
+    road: 3
+    syntax: 3
+    region: 2
+  temporal_dim: 64
+  retrieval_dim: 128
+  temporal_layers: 1
+  temporal_dropout: 0.0
+  calendar_dims:
+    month: 8
+    weekday: 8
+    start_hour: 8
+    holiday: 4
+  top_k: 5
+  metric: cosine
+  temperature: 1.0
+  match_month: true
+  match_holiday: false
+  require_value_separation: true
+  require_graph_identity: true
+
+diffusion:
+  contract_version: three-layer-hierarchical-conditional-diffusion-v1
+  seq_length: 24
+  time_steps: 500
+  sampling_time_steps: 500
+  beta_schedule: linear
+  ddim_sampling_eta: 0.0
+  use_self_cond: true
+  self_condition_probability: 0.5
+  # log1p_zscore has no fixed [-1,1] support.
+  clip_x0: false
+  layer_loss_weights:
+    region: 1.0
+    syntax: 1.0
+    road: 1.0
+  condition:
+    high_dim: 128
+    cond_dim: 256
+    rag_temporal_dim: 64
+    parent_temporal_dim: 64
+    temporal_layers: 1
+    temporal_dropout: 0.0
+    # Teacher-forced parent condition regularization; inference always uses generated parent.
+    parent_condition_dropout: 0.1
+    calendar_dims:
+      month: 8
+      weekday: 8
+      start_hour: 8
+      holiday: 4
+  unet:
+    init_dim: 64
+    base_dim: 32
+    dim_mults: [1, 2, 4, 8]
+    sinusoidal_theta: 10000
+    dropout: 0.1
+    attention_dim_head: 64
+    attention_heads: 4
+
+training:
+  epochs: 100
+  city_bucket_size: 1
+  learning_rate: 0.000005
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  ema_decay: 0.995
+  ema_update_every: 10
+  scheduler_factor: 0.9
+  scheduler_patience: 10
+  validation_generation:
+    enabled: true
+    every_epochs: 10
+    max_snapshots: 1
+
+evaluation:
+  layer_weights:
+    region: 1.0
+    syntax: 1.0
+    road: 1.0
+
+generation:
+  use_ema: true
+  max_snapshots: null
+  save_normalized: true
+  save_physical: true
+
+outputs:
+  directory: outputs/stage4_three_layer_diffusion
+  best_checkpoint: outputs/stage4_three_layer_diffusion/best.pt
