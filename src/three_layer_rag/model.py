@@ -172,6 +172,8 @@ class HierarchicalThreeLayerRAG(nn.Module):
         match_holiday: bool = False,
         require_value_separation: bool = True,
         expected_graph_identity: Mapping[str, Any] | None = None,
+        candidate_chunk_size: int = 4096,
+        city_top_k: int | None = None,
     ):
         super().__init__()
         if low_dims is None:
@@ -237,7 +239,22 @@ class HierarchicalThreeLayerRAG(nn.Module):
         self.match_holiday = bool(match_holiday)
         self.require_value_separation = bool(require_value_separation)
         self.expected_graph_identity = dict(expected_graph_identity or {}) or None
+        if candidate_chunk_size <= 0:
+            raise ValueError("RAG candidate_chunk_size 必须为正")
+        if city_top_k is not None and city_top_k <= 0:
+            raise ValueError("RAG city_top_k 必须为正")
+        self.candidate_chunk_size = int(candidate_chunk_size)
+        self.city_top_k = int(city_top_k or self.top_k)
         self.memory: ThreeLayerRAGMemory | None = None
+        self._eval_source_cache: dict[tuple[int, str, str, int | None], dict[str, list[_SourceEntry]]] = {}
+
+    def train(self, mode: bool = True) -> "HierarchicalThreeLayerRAG":
+        result = super().train(mode)
+        if mode:
+            # Key tensors are differentiable during training and must never be
+            # reused after an optimizer step.
+            self._eval_source_cache.clear()
+        return result
 
     @property
     def num_branches(self) -> int:
@@ -250,6 +267,7 @@ class HierarchicalThreeLayerRAG(nn.Module):
     def set_memory(self, memory: ThreeLayerRAGMemory) -> "HierarchicalThreeLayerRAG":
         memory.validate(self.expected_graph_identity)
         self.memory = memory
+        self._eval_source_cache.clear()
         return self
 
     @staticmethod
@@ -553,8 +571,11 @@ class HierarchicalThreeLayerRAG(nn.Module):
     def _source_entries(
         self, memory: ThreeLayerRAGMemory, expected_length: int | None = None
     ) -> dict[str, list[_SourceEntry]]:
-        entries = {layer: [] for layer in LAYER_NAMES}
         device = next(self.parameters()).device
+        cache_key = (id(memory), str(device), str(next(self.parameters()).dtype), expected_length)
+        if not self.training and cache_key in self._eval_source_cache:
+            return self._eval_source_cache[cache_key]
+        entries = {layer: [] for layer in LAYER_NAMES}
         source_lengths: set[int] = set()
         for snapshot in memory.snapshots:
             snapshot.validate(temporal_channels=self.temporal_channels)
@@ -625,6 +646,8 @@ class HierarchicalThreeLayerRAG(nn.Module):
             raise ValueError(
                 f"严格模式: source memory T={next(iter(source_lengths))} != query T={expected_length}"
             )
+        if not self.training:
+            self._eval_source_cache[cache_key] = entries
         return entries
 
     def _matches_calendar(self, source: Mapping[str, int], target: Mapping[str, int]) -> bool:
@@ -646,8 +669,8 @@ class HierarchicalThreeLayerRAG(nn.Module):
         calendar: Mapping[str, Any],
         batch_size: int,
         target_city: str | Sequence[str] | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-        outputs, time_outputs, all_weights, all_indices = [], [], [], []
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        outputs, time_outputs, all_weights, all_indices, all_selected_city, all_city_names = [], [], [], [], [], []
         for batch_index in range(batch_size):
             target_calendar = self._calendar_at(calendar, batch_index)
             excluded_city = None
@@ -666,31 +689,74 @@ class HierarchicalThreeLayerRAG(nn.Module):
                     f"month={target_calendar['month']} weekday={target_calendar['weekday']} "
                     f"hour={target_calendar['start_hour']}"
                 )
-            keys = torch.stack([entry.key for entry in candidates]).to(query.device, query.dtype)
             query_row = F.normalize(query[batch_index], dim=-1)
-            keys = F.normalize(keys, dim=-1)
-            if self.metric == "cosine":
-                scores = query_row @ keys.transpose(0, 1)
-            else:
-                scores = -torch.cdist(query_row, keys)
-            count = min(self.top_k, len(candidates))
-            scores, selected = torch.topk(scores, k=count, dim=-1)
+            by_city: dict[str, list[int]] = {}
+            for position, entry in enumerate(candidates):
+                by_city.setdefault(entry.city_id, []).append(position)
+            city_names = sorted(by_city)
+            city_scores, city_indices, city_groups = [], [], []
+            per_city = max(self.top_k, self.city_top_k)
+            for city_index, city_name in enumerate(city_names):
+                positions = by_city[city_name]
+                chunk_scores, chunk_indices = [], []
+                for start in range(0, len(positions), self.candidate_chunk_size):
+                    chunk_positions = positions[start:start + self.candidate_chunk_size]
+                    keys = torch.stack([candidates[pos].key for pos in chunk_positions]).to(query.device, query.dtype)
+                    keys = F.normalize(keys, dim=-1)
+                    scores_chunk = (
+                        query_row @ keys.transpose(0, 1)
+                        if self.metric == "cosine"
+                        else -torch.cdist(query_row, keys)
+                    )
+                    count = min(per_city, scores_chunk.shape[-1])
+                    scores_chunk, selected_chunk = torch.topk(scores_chunk, k=count, dim=-1)
+                    chunk_scores.append(scores_chunk)
+                    chunk_indices.append(torch.as_tensor(chunk_positions, device=query.device)[selected_chunk])
+                scores_city = torch.cat(chunk_scores, dim=-1)
+                indices_city = torch.cat(chunk_indices, dim=-1)
+                count = min(per_city, scores_city.shape[-1])
+                scores_city, keep_city = torch.topk(scores_city, k=count, dim=-1)
+                indices_city = indices_city.gather(-1, keep_city)
+                city_scores.append(scores_city)
+                city_indices.append(indices_city)
+                city_groups.append(torch.full_like(indices_city, city_index))
+            scores = torch.cat(city_scores, dim=-1)
+            selected = torch.cat(city_indices, dim=-1)
+            selected_city = torch.cat(city_groups, dim=-1)
+            count = min(self.top_k, scores.shape[-1])
+            scores, keep = torch.topk(scores, k=count, dim=-1)
+            selected = selected.gather(-1, keep)
+            selected_city = selected_city.gather(-1, keep)
             weights = torch.softmax(scores / self.temperature, dim=-1)
             # scores [N,K], values [K,C,T] -> [N,C,T]
             # Candidate indices are shared by all query nodes in this batch;
             # gather values with the selected matrix for exact per-node top-k.
-            value_bank = torch.stack([candidate.value for candidate in candidates]).to(query.device, query.dtype)
-            latent_bank = torch.stack([candidate.temporal_embedding for candidate in candidates]).to(query.device, query.dtype)
-            selected_values = value_bank[selected]
-            selected_latent = latent_bank[selected]
+            selected_positions = selected.detach().cpu().reshape(-1).tolist()
+            selected_values = torch.stack(
+                [candidates[int(position)].value for position in selected_positions]
+            ).to(query.device, query.dtype).reshape(selected.shape[0], selected.shape[1], -1, candidates[0].value.shape[-1])
+            selected_latent = torch.stack(
+                [candidates[int(position)].temporal_embedding for position in selected_positions]
+            ).to(query.device, query.dtype).reshape(selected.shape[0], selected.shape[1], -1)
             outputs.append(torch.einsum("nk,nkct->nct", weights, selected_values))
             time_outputs.append(torch.einsum("nk,nkd->nd", weights, selected_latent))
             all_weights.append(weights)
             all_indices.append(selected)
+            all_selected_city.append(selected_city)
+            all_city_names.append(city_names)
         return (
             torch.stack(outputs),
             torch.stack(time_outputs),
-            {"weights": torch.stack(all_weights), "indices": torch.stack(all_indices)},
+            {
+                "weights": torch.stack(all_weights),
+                "indices": torch.stack(all_indices),
+                "selected_city": torch.stack(all_selected_city),
+                "city_names": all_city_names,
+                "candidate_city_counts": [
+                    [sum(1 for entry in candidates if entry.city_id == name) for name in names]
+                    for names in all_city_names
+                ],
+            },
         )
 
     def forward(

@@ -30,6 +30,8 @@ frequency:
 attention:
   # 全部 M+K+N 节点共享同一个全局注意力分支。
   global_attn: linear
+  # joint 保持项目要求的全联合节点注意力；same_layer 可用于严格层内全局传播审计。
+  global_attention_scope: joint
   full_attention_max_nodes: 4096
   num_heads: 4
 

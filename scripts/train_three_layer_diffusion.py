@@ -80,12 +80,21 @@ def _evaluate_noise(
     snapshots: list[Any],
     high: Mapping[str, Mapping[str, torch.Tensor]],
     memory: Any,
+    validation_bank: list[Mapping[str, Mapping[str, torch.Tensor]]],
 ) -> dict[str, float]:
     system.eval()
     totals, layers = [], {name: [] for name in ("region", "syntax", "road")}
     topk, top_weight = [], []
-    for snapshot in snapshots:
-        result = system.training_loss(snapshot, high_features=high[snapshot.city_id], memory=memory)
+    for index, snapshot in enumerate(snapshots):
+        bank = validation_bank[index]
+        result = system.training_loss(
+            snapshot,
+            high_features=high[snapshot.city_id],
+            memory=memory,
+            noise={layer: bank[layer]["noise"] for layer in ("region", "syntax", "road")},
+            timesteps={layer: bank[layer]["timesteps"] for layer in ("region", "syntax", "road")},
+            force_self_condition=False,
+        )
         totals.append(result["loss"].detach())
         for layer in layers:
             layers[layer].append(result["layer_losses"][layer].detach())
@@ -100,6 +109,28 @@ def _evaluate_noise(
     output["rag_mean_actual_top_k"] = sum(topk) / len(topk)
     output["rag_mean_top1_weight"] = sum(top_weight) / len(top_weight)
     return output
+
+
+def _build_validation_bank(
+    snapshots: list[Any], *, time_steps: int, seed: int
+) -> list[dict[str, dict[str, torch.Tensor]]]:
+    """Create epoch-independent timestep/noise draws for stable model selection."""
+
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    channels = {"region": 2, "syntax": 3, "road": 3}
+    bank = []
+    for snapshot in snapshots:
+        layers = {}
+        for layer, count in channels.items():
+            target = snapshot.value_temporal_features[layer]
+            if target.ndim != 3 or target.shape[1] != count:
+                raise ValueError(f"validation {layer} shape 不符合固定 noise bank 契约")
+            layers[layer] = {
+                "timesteps": torch.randint(0, time_steps, (target.shape[0],), generator=generator),
+                "noise": torch.randn(target.shape, generator=generator),
+            }
+        bank.append(layers)
+    return bank
 
 
 @torch.no_grad()
@@ -210,6 +241,8 @@ def main() -> None:
         gradient_clip_norm=float(training_cfg.get("gradient_clip_norm", 1.0)),
     )
     start_epoch = 0
+    best = float("inf")
+    history = []
     if args.resume:
         payload = load_diffusion_checkpoint(
             _path(args.resume),
@@ -221,6 +254,9 @@ def main() -> None:
         )
         start_epoch = int(payload["epoch"]) + 1
         trainer.global_step = int(payload["global_step"])
+        if payload.get("best_metric") is not None:
+            best = float(payload["best_metric"])
+        history = list(payload.get("history", []))
 
     dataset = SnapshotDataset(train)
     batch_sampler = CityGraphBucketBatchSampler(
@@ -236,8 +272,11 @@ def main() -> None:
     output_dir = _path(config["outputs"]["directory"])
     best_path = _path(config["outputs"]["best_checkpoint"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    best = float("inf")
-    history = []
+    validation_bank = _build_validation_bank(
+        validation,
+        time_steps=int(config["diffusion"]["time_steps"]),
+        seed=seed + 17_071,
+    )
     generation_cfg = training_cfg.get("validation_generation", {})
     for epoch in range(start_epoch, epochs):
         batch_sampler.set_epoch(epoch)
@@ -245,7 +284,7 @@ def main() -> None:
         for batch in loader:
             train_metrics.append(trainer.train_batch(batch))
         validation_metrics = _evaluate_noise(
-            ema.ema_model, validation, high, memory
+            ema.ema_model, validation, high, memory, validation_bank
         )
         scheduler.step(validation_metrics["normalized_noise_loss"])
         record: dict[str, Any] = {
@@ -268,6 +307,9 @@ def main() -> None:
             )
         history.append(record)
         print(json.dumps(record, ensure_ascii=False))
+        improved = validation_metrics["normalized_noise_loss"] < best
+        if improved:
+            best = validation_metrics["normalized_noise_loss"]
         save_diffusion_checkpoint(
             output_dir / "last.pt",
             system,
@@ -279,9 +321,10 @@ def main() -> None:
             config=config,
             identity=identity,
             seed=seed,
+            best_metric=best,
+            history=history,
         )
-        if validation_metrics["normalized_noise_loss"] < best:
-            best = validation_metrics["normalized_noise_loss"]
+        if improved:
             save_diffusion_checkpoint(
                 best_path,
                 system,
@@ -293,6 +336,8 @@ def main() -> None:
                 config=config,
                 identity=identity,
                 seed=seed,
+                best_metric=best,
+                history=history,
             )
         (output_dir / "history.json").write_text(
             json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"

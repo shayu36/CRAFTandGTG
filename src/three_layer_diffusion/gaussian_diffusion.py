@@ -139,6 +139,10 @@ class ConditionalGaussianDiffusion1D(nn.Module):
     ) -> torch.Tensor:
         if noise is None:
             noise = torch.randn_like(x_start)
+        else:
+            noise = noise.to(device=x_start.device, dtype=x_start.dtype)
+            if noise.shape != x_start.shape or not torch.isfinite(noise).all():
+                raise ValueError("training noise shape/device/dtype 非法")
         if noise.shape != x_start.shape or not torch.isfinite(noise).all():
             raise ValueError("q_sample noise shape 非法或含 NaN/Inf")
         return (

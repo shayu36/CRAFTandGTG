@@ -1,8 +1,8 @@
 # 当前代码状态
 
 > 状态日期：2026-09-19  
-> 本轮实现基线提交：`0153556c878bbc6d5d0bf77fe856b67409d920da`（`RAG`）
-> 当前工作区包含尚未提交的 Stage 4 Conditional Diffusion 改造。
+> 本轮审计基线提交：`28119897e95cfa31a380555af73836250c98f681`（`first_over`）
+> 当前工作区包含尚未提交的 GraphGPS/LapPE/RAG/Stage 4 稳定性改造。
 
 ## 1. 总体架构
 
@@ -300,6 +300,15 @@ python scripts/generate_three_layer_diffusion.py \
 GraphGPS、动态构建和 RAG memory 路径中被 PyG 禁用后仍能运行。Stage 4 的
 Diffusion U-Net 本身不依赖这些扩展，但导入上游 RAG 包时仍会显示这些 warning。
 
-另一个实际风险是现有 RAG source memory 按 snapshot/node 在线重算 key；三城正式
-训练的吞吐和显存尚未基准测试。当前实现语义完整，但在开始长训练前应先执行少量
-snapshot 的 GPU 性能烟雾测试，再决定是否增加无泄漏的 key cache/分块检索。
+另一个仍需实测的风险是三城正式训练的吞吐和显存。本轮已在 eval/generation 缓存
+source keys，并在训练和推理都采用分块、分城市 Top-K；开始长训练前仍应执行少量
+snapshot 的 GPU 性能烟雾测试。
+
+## 8. 本轮审计修复（工作区未提交）
+
+- LapPE v3 使用联合消息边权构造无向谱图，并将关系类型指纹纳入 cache identity；消息传播仍使用原始有向异构边。
+- LapPE eigenvector 采用最大幅值分量定号，降低重复计算的符号漂移。
+- GraphGPS 默认 `global_attention_scope: joint`，符合联合三层全局注意力要求；新增显式 `same_layer` 模式用于严格层内全局传播审计，不能静默改变默认语义。
+- Stage-4 验证固定 timestep/noise bank，避免随机单次验证损失影响 best checkpoint 和 scheduler。
+- Stage-4 checkpoint 保存/恢复 RNG、best metric 和 history；`normalization: none` 使用恒等统计量，`expm1` 反归一化增加有限范围保护。
+- Stage-4 factory 严格校验 RAG/Diffusion contract、序列长度、通道数和采样步数。

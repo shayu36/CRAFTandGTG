@@ -213,6 +213,7 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
         masks: Mapping[str, torch.Tensor] | None = None,
         noise: Mapping[str, torch.Tensor] | None = None,
         timesteps: Mapping[str, torch.Tensor] | None = None,
+        force_self_condition: bool | None = None,
     ) -> dict[str, Any]:
         """Train with real normalized parents (teacher forcing)."""
 
@@ -235,6 +236,7 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
             mask=None if masks is None else flatten_nodes(_ensure_batched(masks["region"], 3, "mask.region").to(device))[0],
             noise=None if noise is None else flatten_nodes(_ensure_batched(noise["region"], 3, "noise.region").to(device))[0],
             timesteps=None if timesteps is None else timesteps.get("region"),
+            force_self_condition=force_self_condition,
         )
 
         syntax_parent = broadcast_parent_to_children(
@@ -253,6 +255,7 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
             mask=None if masks is None else flatten_nodes(_ensure_batched(masks["syntax"], 3, "mask.syntax").to(device))[0],
             noise=None if noise is None else flatten_nodes(_ensure_batched(noise["syntax"], 3, "noise.syntax").to(device))[0],
             timesteps=None if timesteps is None else timesteps.get("syntax"),
+            force_self_condition=force_self_condition,
         )
 
         road_parent = broadcast_parent_to_children(
@@ -271,6 +274,7 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
             mask=None if masks is None else flatten_nodes(_ensure_batched(masks["road"], 3, "mask.road").to(device))[0],
             noise=None if noise is None else flatten_nodes(_ensure_batched(noise["road"], 3, "noise.road").to(device))[0],
             timesteps=None if timesteps is None else timesteps.get("road"),
+            force_self_condition=force_self_condition,
         )
         losses = {"region": region_loss, "syntax": syntax_loss, "road": road_loss}
         total = sum(self.layer_loss_weights[layer] * losses[layer] for layer in LAYER_ORDER)
@@ -381,6 +385,9 @@ class ThreeLayerRAGDiffusionSystem(nn.Module):
         high_features: Mapping[str, torch.Tensor],
         memory: ThreeLayerRAGMemory,
         masks: Mapping[str, torch.Tensor] | None = None,
+        noise: Mapping[str, torch.Tensor] | None = None,
+        timesteps: Mapping[str, torch.Tensor] | None = None,
+        force_self_condition: bool | None = None,
     ) -> dict[str, Any]:
         inputs.validate(temporal_channels=LAYER_CHANNELS)
         if inputs.value_temporal_features is None:
@@ -393,6 +400,9 @@ class ThreeLayerRAGDiffusionSystem(nn.Module):
             calendar=inputs.calendar,
             parent_operator=inputs.parent_operator or {},
             masks=masks,
+            noise=noise,
+            timesteps=timesteps,
+            force_self_condition=force_self_condition,
         )
         result["rag"] = rag_outputs
         return result

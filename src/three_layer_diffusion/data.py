@@ -146,6 +146,10 @@ class DynamicNormalizer:
         layers = {}
         for layer, channel_names in CHANNEL_NAMES.items():
             config = payload.get("layers", {}).get(layer)
+            if mode == "none" and not isinstance(config, Mapping):
+                config = {"mean": [0.0] * len(channel_names), "std": [1.0] * len(channel_names)}
+            if mode == "none" and isinstance(config, Mapping) and not config.get("mean") and not config.get("std"):
+                config = {"mean": [0.0] * len(channel_names), "std": [1.0] * len(channel_names)}
             if not isinstance(config, Mapping):
                 raise ValueError(f"严格模式: normalizer 缺少 {layer}")
             mean = tuple(float(value) for value in config.get("mean", ()))
@@ -157,7 +161,14 @@ class DynamicNormalizer:
             layers[layer] = {"mean": mean, "std": std}
         return cls(mode, layers, file_sha256(source), str(source.resolve()))
 
-    def inverse(self, layer: str, normalized: torch.Tensor, *, nonnegative: bool = True) -> torch.Tensor:
+    def inverse(
+        self,
+        layer: str,
+        normalized: torch.Tensor,
+        *,
+        nonnegative: bool = True,
+        max_log_value: float = 30.0,
+    ) -> torch.Tensor:
         if layer not in CHANNEL_NAMES:
             raise KeyError(f"未知动态层级 {layer}")
         if normalized.ndim < 2 or normalized.shape[-2] != len(CHANNEL_NAMES[layer]):
@@ -168,9 +179,17 @@ class DynamicNormalizer:
         shape[-2] = len(CHANNEL_NAMES[layer])
         mean = normalized.new_tensor(self.layers[layer]["mean"]).reshape(shape)
         std = normalized.new_tensor(self.layers[layer]["std"]).reshape(shape)
-        value = normalized if self.mode == "none" else torch.expm1(normalized * std + mean)
+        if max_log_value <= 0 or not math_is_finite(float(max_log_value)):
+            raise ValueError("max_log_value 必须为有限正数")
+        if self.mode == "none":
+            value = normalized
+        else:
+            transformed = (normalized * std + mean).clamp_min(-max_log_value).clamp_max(max_log_value)
+            value = torch.expm1(transformed)
         if nonnegative:
             value = value.clamp_min(0.0)
+        if not torch.isfinite(value).all():
+            raise FloatingPointError("严格模式: 反归一化结果含 NaN/Inf")
         return value
 
     def validate_bundle_metadata(self, metadata: Mapping[str, Any]) -> None:
@@ -183,6 +202,8 @@ class DynamicNormalizer:
             raise ValueError("严格模式: bundle/source normalizer mode 不匹配")
         for layer in CHANNEL_NAMES:
             config = declared.get("layers", {}).get(layer, {})
+            if self.mode == "none" and not config:
+                config = {"mean": [0.0] * len(CHANNEL_NAMES[layer]), "std": [1.0] * len(CHANNEL_NAMES[layer])}
             mean = tuple(float(value) for value in config.get("mean", ()))
             std = tuple(float(value) for value in config.get("std", ()))
             if mean != tuple(self.layers[layer]["mean"]) or std != tuple(self.layers[layer]["std"]):

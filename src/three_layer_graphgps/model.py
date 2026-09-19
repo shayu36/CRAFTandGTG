@@ -47,19 +47,22 @@ class GlobalAttentionBranch(nn.Module):
 
     ALLOWED = {"none", "local", "linear", "full"}
 
-    def __init__(self, dim: int, heads: int, dropout: float, mode: str, *, full_attention_max_nodes: int, layer_name: str = "joint") -> None:
+    def __init__(self, dim: int, heads: int, dropout: float, mode: str, *, full_attention_max_nodes: int, layer_name: str = "joint", scope: str = "joint") -> None:
         super().__init__()
         if mode not in self.ALLOWED:
             raise ValueError(f"严格模式: global_attn={mode!r} 非法")
         if full_attention_max_nodes <= 0:
             raise ValueError("严格模式: full_attention_max_nodes 必须为正")
         self.mode = mode
+        if scope not in {"joint", "same_layer"}:
+            raise ValueError("严格模式: global_attention_scope 必须为 joint 或 same_layer")
+        self.scope = scope
         self.layer_name = layer_name
         self.full_attention_max_nodes = int(full_attention_max_nodes)
         self.full_attention = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True) if mode == "full" else None
         self.linear_attention = LinearGlobalAttention(dim, heads, dropout) if mode in {"linear", "full"} else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_scope(self, x: torch.Tensor) -> torch.Tensor:
         if self.mode in {"none", "local"}:
             return torch.zeros_like(x)
         if self.mode == "linear":
@@ -73,6 +76,17 @@ class GlobalAttentionBranch(nn.Module):
             return self.linear_attention(x)
         result, _ = self.full_attention(x.unsqueeze(0), x.unsqueeze(0), x.unsqueeze(0), need_weights=False)
         return result.squeeze(0)
+
+    def forward(self, x: torch.Tensor, node_type: torch.Tensor | None = None) -> torch.Tensor:
+        if self.scope == "joint":
+            return self._forward_scope(x)
+        if node_type is None or node_type.shape != (x.shape[0],):
+            raise ValueError("same_layer global attention 需要 node_type[V]")
+        output = torch.zeros_like(x)
+        for kind in torch.unique(node_type, sorted=True).tolist():
+            mask = node_type == int(kind)
+            output[mask] = self._forward_scope(x[mask])
+        return output
 
 
 class RelationAwareWeightedMessagePassing(nn.Module):
@@ -113,19 +127,19 @@ class RelationAwareWeightedMessagePassing(nn.Module):
 
 
 class GraphGPSLayer(nn.Module):
-    def __init__(self, dim: int, heads: int, dropout: float, global_attention: str, *, full_attention_max_nodes: int) -> None:
+    def __init__(self, dim: int, heads: int, dropout: float, global_attention: str, *, full_attention_max_nodes: int, global_attention_scope: str = "joint") -> None:
         super().__init__()
         self.local_norm = nn.LayerNorm(dim)
         self.global_norm = nn.LayerNorm(dim)
         self.ffn_norm = nn.LayerNorm(dim)
         self.local_mpnn = RelationAwareWeightedMessagePassing(dim, dropout)
-        self.global_attention = GlobalAttentionBranch(dim, heads, dropout, global_attention, full_attention_max_nodes=full_attention_max_nodes)
+        self.global_attention = GlobalAttentionBranch(dim, heads, dropout, global_attention, full_attention_max_nodes=full_attention_max_nodes, scope=global_attention_scope)
         self.ffn = nn.Sequential(nn.Linear(dim, 4 * dim), nn.GELU(), nn.Dropout(dropout), nn.Linear(4 * dim, dim))
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_type: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_type: torch.Tensor, edge_weight: torch.Tensor, node_type: torch.Tensor | None = None) -> torch.Tensor:
         local_h = self.local_mpnn(self.local_norm(x), edge_index, edge_type, edge_weight)
-        global_h = self.global_attention(self.global_norm(x))
+        global_h = self.global_attention(self.global_norm(x), node_type=node_type)
         x = x + self.dropout(local_h) + self.dropout(global_h)
         x = x + self.dropout(self.ffn(self.ffn_norm(x)))
         if not torch.isfinite(x).all():
@@ -136,19 +150,19 @@ class GraphGPSLayer(nn.Module):
 class GraphGPSStack(nn.Module):
     """The only stack in the model; it always receives all joint nodes."""
 
-    def __init__(self, dim: int, depth: int, heads: int, dropout: float, global_attention: str, *, full_attention_max_nodes: int) -> None:
+    def __init__(self, dim: int, depth: int, heads: int, dropout: float, global_attention: str, *, full_attention_max_nodes: int, global_attention_scope: str = "joint") -> None:
         super().__init__()
         if depth <= 0:
             raise ValueError("严格模式: GraphGPS depth 必须为正")
         self.layers = nn.ModuleList([
-            GraphGPSLayer(dim, heads, dropout, global_attention, full_attention_max_nodes=full_attention_max_nodes)
+            GraphGPSLayer(dim, heads, dropout, global_attention, full_attention_max_nodes=full_attention_max_nodes, global_attention_scope=global_attention_scope)
             for _ in range(depth)
         ])
         self.output_norm = nn.LayerNorm(dim)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_type: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_type: torch.Tensor, edge_weight: torch.Tensor, node_type: torch.Tensor | None = None) -> torch.Tensor:
         for layer in self.layers:
-            x = layer(x, edge_index, edge_type, edge_weight)
+            x = layer(x, edge_index, edge_type, edge_weight, node_type=node_type)
         return self.output_norm(x)
 
 
@@ -189,6 +203,8 @@ def validate_stage2_config(config: Mapping[str, Any]) -> None:
         raise ValueError("严格模式: attention.global_attn 非法")
     if int(attention_cfg.get("full_attention_max_nodes", 4096)) <= 0:
         raise ValueError("严格模式: attention.full_attention_max_nodes 必须为正")
+    if str(attention_cfg.get("global_attention_scope", "joint")) not in {"joint", "same_layer"}:
+        raise ValueError("严格模式: attention.global_attention_scope 必须为 joint 或 same_layer")
 
 
 class ThreeLayerGraphGPSLapPE(nn.Module):
@@ -209,6 +225,8 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
         self.pe_cache_dir = pos_cfg.get("cache_dir") if bool(pos_cfg.get("cache", True)) else None
         pe_dim = int(pos_cfg.get("pe_dim", 16))
         heads, global_attn, full_max = int(attention_cfg.get("num_heads", 4)), str(attention_cfg.get("global_attn", "linear")), int(attention_cfg.get("full_attention_max_nodes", 4096))
+        global_scope = str(attention_cfg.get("global_attention_scope", "joint"))
+        self.global_attention_scope = global_scope
         self.road_input, self.syntax_input, self.region_input = nn.Linear(33, self.hidden_dim), nn.Linear(5, self.hidden_dim), nn.Linear(45, self.hidden_dim)
         # Explicit per-layer type embeddings make the otherwise identical
         # projected feature spaces distinguishable inside the joint graph.
@@ -225,7 +243,7 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
                 int(model_cfg.get("num_layers_region", 2)),
             ),
         ))
-        self.graphgps = GraphGPSStack(self.hidden_dim, depth, heads, self.dropout, global_attn, full_attention_max_nodes=full_max)
+        self.graphgps = GraphGPSStack(self.hidden_dim, depth, heads, self.dropout, global_attn, full_attention_max_nodes=full_max, global_attention_scope=global_scope)
         self.num_graphgps_stacks = 1
         self.joint_decoupler = SpectralFeatureDecoupler(orthogonality_tolerance=float(frequency_cfg.get("orthogonality_tolerance", 1e-3)), reconstruction_tolerance=float(frequency_cfg.get("reconstruction_tolerance", 1e-5)))
         self.frequency_fusion = nn.Sequential(nn.Linear(2 * self.hidden_dim, self.hidden_dim), nn.LayerNorm(self.hidden_dim), nn.GELU())
@@ -270,7 +288,12 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
         ], dim=0)
         x_joint = raw_h + type_h + self.pe_projection(self.joint_lappe(posenc.joint))
         # Exactly one invocation on the complete V=M+K+N node set.
-        h_joint = self.graphgps(x_joint, graph.edge_index_joint, graph.edge_type, graph.edge_weight)
+        if self.global_attention_scope == "joint":
+            # Preserve the public four-argument GraphGPS call used by older
+            # hooks/tests; joint attention does not need node_type.
+            h_joint = self.graphgps(x_joint, graph.edge_index_joint, graph.edge_type, graph.edge_weight)
+        else:
+            h_joint = self.graphgps(x_joint, graph.edge_index_joint, graph.edge_type, graph.edge_weight, node_type=graph.node_type)
         frequency = self.joint_decoupler(h_joint, posenc.joint, self.joint_low_modes)
         low_joint, high_joint = frequency.low, frequency.high
         road_sl, syntax_sl, region_sl = slice(0, m), slice(m, m + k), slice(m + k, m + k + n)
@@ -282,8 +305,15 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
         prediction = self.prediction_head(self.frequency_fusion(torch.cat([region_low, region_high], dim=-1)))
         result = {"x_joint": x_joint, "H_joint": h_joint, "H_joint_low": low_joint, "H_joint_high": high_joint, "joint_low_coefficients": frequency.coefficients, "H_road": road_h, "H_road_low": road_low, "H_road_high": road_high, "pooled_road_to_syntax": pooled_road, "H_syntax": syntax_h, "H_syntax_low": syntax_low, "H_syntax_high": syntax_high, "pooled_syntax_to_region": pooled_syntax, "H_region": region_h, "H_region_low": region_low, "H_region_high": region_high, "pred": prediction}
         for name, tensor in result.items():
-            if not torch.isfinite(tensor).all():
+            if isinstance(tensor, torch.Tensor) and not torch.isfinite(tensor).all():
                 raise FloatingPointError(f"严格模式: {name} 含 NaN/Inf")
         if return_edge_audit:
-            result.update({"edge_index_joint_msg": graph.edge_index_joint, "edge_index_joint_pe": posenc.joint.edge_index_pe, "edge_type_joint": graph.edge_type, "edge_weight_joint": graph.edge_weight})
+            result.update({
+                "edge_index_joint_msg": graph.edge_index_joint,
+                "edge_index_joint_pe": posenc.joint.edge_index_pe,
+                "edge_weight_joint_pe": posenc.joint.edge_weight_pe,
+                "edge_type_joint_pe": posenc.joint.edge_type_pe,
+                "edge_type_joint": graph.edge_type,
+                "edge_weight_joint": graph.edge_weight,
+            })
         return result

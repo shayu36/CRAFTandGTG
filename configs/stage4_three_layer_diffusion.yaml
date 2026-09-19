@@ -39,6 +39,9 @@ rag:
   match_holiday: false
   require_value_separation: true
   require_graph_identity: true
+  # 分块检索避免 query×candidate 稠密矩阵；每个 source city 先保留相同数量候选。
+  candidate_chunk_size: 4096
+  city_top_k: 5
 
 diffusion:
   contract_version: three-layer-hierarchical-conditional-diffusion-v1

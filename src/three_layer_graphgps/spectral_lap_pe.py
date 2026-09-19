@@ -22,7 +22,7 @@ from scipy.sparse.linalg import ArpackNoConvergence, eigsh
 from static_hierarchy.contracts import CityStaticHierarchy, validate_city_static_hierarchy
 
 
-LAPPE_VERSION = "three-layer-joint-lappe-v2"
+LAPPE_VERSION = "three-layer-joint-lappe-v3-weighted"
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,8 @@ class LaplacianEigenpairs:
     mask: torch.Tensor
     edge_index_pe: torch.Tensor
     metadata: dict[str, Any]
+    edge_weight_pe: torch.Tensor | None = None
+    edge_type_pe: torch.Tensor | None = None
 
     def to(self, device: torch.device | str) -> "LaplacianEigenpairs":
         return LaplacianEigenpairs(
@@ -46,6 +48,8 @@ class LaplacianEigenpairs:
             mask=self.mask.to(device),
             edge_index_pe=self.edge_index_pe.to(device),
             metadata=self.metadata,
+            edge_weight_pe=None if self.edge_weight_pe is None else self.edge_weight_pe.to(device),
+            edge_type_pe=None if self.edge_type_pe is None else self.edge_type_pe.to(device),
         )
 
 
@@ -84,6 +88,14 @@ class HierarchyLaplacianPE:
     def edge_index_joint_pe(self) -> torch.Tensor:
         return self.joint.edge_index_pe
 
+    @property
+    def edge_weight_joint_pe(self) -> torch.Tensor | None:
+        return self.joint.edge_weight_pe
+
+    @property
+    def edge_type_joint_pe(self) -> torch.Tensor | None:
+        return self.joint.edge_type_pe
+
 
 def _validate_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     if num_nodes <= 0:
@@ -100,33 +112,93 @@ def _validate_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tens
     return edge_index
 
 
-def to_undirected_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+def to_undirected_edge_index_with_weight(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weight: torch.Tensor | None = None,
+    edge_type: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """无向化并聚合平行边，同时保留消息边权。
+
+    每个无向 pair 以两个方向保存；同一 pair 的所有有向关系权重求和，
+    这是 normalized Laplacian 对有向消息图的可审计无向副本。关系类型
+    不参与数值求和，但会作为 ``edge_type_pe`` 和 cache identity 保存，
+    防止不同关系图错误复用同一组 eigenpairs。
+    """
     """返回稳定排序、去重且不含自环的无向 COO 边。
 
     无向边以两个方向显式保存。输入不会被原地修改。
     """
 
     edge_index = _validate_edge_index(edge_index, num_nodes)
+    if edge_weight is None:
+        weights = torch.ones(edge_index.shape[1], dtype=torch.float64)
+    else:
+        weights = torch.as_tensor(edge_weight).detach().cpu().reshape(-1)
+        if weights.shape != (edge_index.shape[1],) or not weights.is_floating_point():
+            raise ValueError("严格模式: LapPE edge_weight 长度/dtype 错误")
+        if not torch.isfinite(weights).all() or (weights <= 0).any():
+            raise ValueError("严格模式: LapPE edge_weight 必须为有限正数")
+        weights = weights.to(torch.float64)
+    types = None
+    if edge_type is not None:
+        types = torch.as_tensor(edge_type).detach().cpu().reshape(-1)
+        if types.shape != (edge_index.shape[1],) or types.dtype != torch.long:
+            raise ValueError("严格模式: LapPE edge_type 长度/dtype 错误")
     if edge_index.numel() == 0:
-        return torch.empty((2, 0), dtype=torch.long)
+        return torch.empty((2, 0), dtype=torch.long), torch.empty(0, dtype=torch.float64), None if types is None else torch.empty(0, dtype=torch.long)
     src = edge_index[0].numpy().astype(np.int64, copy=False)
     dst = edge_index[1].numpy().astype(np.int64, copy=False)
     keep = src != dst
+    kept_weights = weights.numpy()[keep]
+    kept_types = None if types is None else types.numpy()[keep]
     src, dst = src[keep], dst[keep]
     if src.size == 0:
-        return torch.empty((2, 0), dtype=torch.long)
+        return torch.empty((2, 0), dtype=torch.long), torch.empty(0, dtype=torch.float64), None if types is None else torch.empty(0, dtype=torch.long)
     left = np.minimum(src, dst)
     right = np.maximum(src, dst)
-    undirected_pairs = np.unique(np.stack([left, right], axis=1), axis=0)
-    both = np.concatenate([undirected_pairs, undirected_pairs[:, ::-1]], axis=0)
+    pairs = np.stack([left, right], axis=1)
+    unique_pairs, inverse = np.unique(pairs, axis=0, return_inverse=True)
+    pair_weights = np.zeros(unique_pairs.shape[0], dtype=np.float64)
+    np.add.at(pair_weights, inverse, kept_weights)
+    both = np.concatenate([unique_pairs, unique_pairs[:, ::-1]], axis=0)
+    both_weights = np.concatenate([pair_weights, pair_weights], axis=0)
+    both_types = None
+    if kept_types is not None:
+        # Preserve a deterministic audit label for each undirected pair.  The
+        # numeric Laplacian uses the aggregated weight above; relation labels
+        # are retained for cache identity and inspection.
+        pair_types = np.zeros(unique_pairs.shape[0], dtype=np.int64)
+        for pair_index in range(unique_pairs.shape[0]):
+            pair_types[pair_index] = int(np.min(kept_types[inverse == pair_index]))
+        both_types = np.concatenate([pair_types, pair_types], axis=0)
     order = np.lexsort((both[:, 1], both[:, 0]))
-    return torch.from_numpy(both[order].T.copy()).long()
+    return (
+        torch.from_numpy(both[order].T.copy()).long(),
+        torch.from_numpy(both_weights[order].copy()),
+        None if both_types is None else torch.from_numpy(both_types[order].copy()).long(),
+    )
 
 
-def _graph_hash(edge_index_pe: torch.Tensor, num_nodes: int) -> str:
+def to_undirected_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """返回稳定排序、去重且不含自环的无向 COO 边（兼容旧 API）。"""
+
+    return to_undirected_edge_index_with_weight(edge_index, num_nodes)[0]
+
+
+def _graph_hash(
+    edge_index_pe: torch.Tensor,
+    num_nodes: int,
+    edge_weight_pe: torch.Tensor | None = None,
+    edge_type_pe: torch.Tensor | None = None,
+) -> str:
     digest = hashlib.sha256()
     digest.update(np.asarray([num_nodes], dtype="<i8").tobytes())
     digest.update(edge_index_pe.contiguous().numpy().astype("<i8", copy=False).tobytes())
+    if edge_weight_pe is not None:
+        digest.update(np.asarray(edge_weight_pe.cpu(), dtype="<f8").tobytes())
+    if edge_type_pe is not None:
+        digest.update(edge_type_pe.contiguous().numpy().astype("<i8", copy=False).tobytes())
     return digest.hexdigest()
 
 
@@ -136,17 +208,26 @@ def pe_graph_hash(edge_index: torch.Tensor, num_nodes: int) -> str:
     return _graph_hash(to_undirected_edge_index(edge_index, num_nodes), num_nodes)
 
 
-def _laplacian(edge_index_pe: torch.Tensor, num_nodes: int, normalization: str) -> sparse.csr_matrix:
+def _laplacian(
+    edge_index_pe: torch.Tensor,
+    num_nodes: int,
+    normalization: str,
+    edge_weight_pe: torch.Tensor | None = None,
+) -> sparse.csr_matrix:
     if normalization != "sym":
         raise ValueError("严格模式: 第一版 LapPE 仅支持 normalization='sym'")
     if edge_index_pe.numel():
         indices = edge_index_pe.numpy()
+        values = (
+            np.ones(indices.shape[1], dtype=np.float64)
+            if edge_weight_pe is None
+            else np.asarray(edge_weight_pe.detach().cpu(), dtype=np.float64)
+        )
         adjacency = sparse.coo_matrix(
-            (np.ones(indices.shape[1], dtype=np.float64), (indices[0], indices[1])),
+            (values, (indices[0], indices[1])),
             shape=(num_nodes, num_nodes),
         ).tocsr()
         adjacency.sum_duplicates()
-        adjacency.data.fill(1.0)
     else:
         adjacency = sparse.csr_matrix((num_nodes, num_nodes), dtype=np.float64)
     degree = np.asarray(adjacency.sum(axis=1)).reshape(-1)
@@ -217,6 +298,13 @@ def _solve_smallest(laplacian: sparse.csr_matrix, requested: int) -> tuple[np.nd
         order = np.argsort(values, kind="stable")
         values, vectors = values[order], vectors[:, order]
         values[np.abs(values) < 1e-7] = 0.0
+        # eigsh eigenvectors are sign-indeterminate.  Canonicalize each
+        # column using its largest-magnitude entry so cached/recomputed PE
+        # has a stable sign (up to genuinely repeated-eigenvalue rotations).
+        for column in range(vectors.shape[1]):
+            pivot = int(np.argmax(np.abs(vectors[:, column])))
+            if vectors[pivot, column] < 0:
+                vectors[:, column] *= -1.0
     return values, vectors
 
 
@@ -244,7 +332,13 @@ def _from_cache(path: Path, identity: dict[str, Any]) -> LaplacianEigenpairs:
     eigvecs = torch.from_numpy(np.asarray(data["eigvecs"], dtype=np.float32))
     mask = torch.from_numpy(np.asarray(data["mask"], dtype=np.bool_))
     edge_index_pe = torch.from_numpy(np.asarray(data["edge_index_pe"], dtype=np.int64)).long()
-    result = LaplacianEigenpairs(eigvals, eigvecs, mask, edge_index_pe, metadata)
+    edge_weight_pe = None
+    if "edge_weight_pe" in data.files:
+        edge_weight_pe = torch.from_numpy(np.asarray(data["edge_weight_pe"], dtype=np.float64))
+    edge_type_pe = None
+    if "edge_type_pe" in data.files:
+        edge_type_pe = torch.from_numpy(np.asarray(data["edge_type_pe"], dtype=np.int64)).long()
+    result = LaplacianEigenpairs(eigvals, eigvecs, mask, edge_index_pe, metadata, edge_weight_pe, edge_type_pe)
     _validate_result(result, num_nodes, k)
     return result
 
@@ -258,6 +352,13 @@ def _validate_result(result: LaplacianEigenpairs, num_nodes: int, k: int) -> Non
         raise ValueError(f"严格模式: LapPE mask 应为 BoolTensor[{k}]")
     if not torch.isfinite(result.eigvals).all() or not torch.isfinite(result.eigvecs).all():
         raise ValueError("严格模式: LapPE eigenpairs 含 NaN/Inf")
+    if result.edge_weight_pe is not None:
+        if result.edge_weight_pe.shape != (result.edge_index_pe.shape[1],):
+            raise ValueError("严格模式: LapPE edge_weight_pe 长度错误")
+        if not torch.isfinite(result.edge_weight_pe).all() or (result.edge_weight_pe <= 0).any():
+            raise ValueError("严格模式: LapPE edge_weight_pe 必须为有限正数")
+    if result.edge_type_pe is not None and result.edge_type_pe.shape != (result.edge_index_pe.shape[1],):
+        raise ValueError("严格模式: LapPE edge_type_pe 长度错误")
     valid_values = result.eigvals[0, result.mask, 0]
     if valid_values.numel() > 1 and torch.any(valid_values[1:] < valid_values[:-1] - 1e-6):
         raise ValueError("严格模式: LapPE eigenvalues 未按升序排列")
@@ -274,6 +375,8 @@ def compute_sparse_laplacian_eigenpairs(
     *,
     pe_version: str = LAPPE_VERSION,
     metadata_extra: dict[str, Any] | None = None,
+    edge_weight: torch.Tensor | None = None,
+    edge_type: torch.Tensor | None = None,
 ) -> LaplacianEigenpairs:
     """以固定形状返回最小 Laplacian eigenpairs，并可按图指纹缓存。
 
@@ -285,8 +388,13 @@ def compute_sparse_laplacian_eigenpairs(
     if k <= 0:
         raise ValueError("严格模式: LapPE k 必须为正")
     original = _validate_edge_index(edge_index, num_nodes)
-    edge_index_pe = to_undirected_edge_index(original, num_nodes)
-    graph_hash = _graph_hash(edge_index_pe, num_nodes)
+    edge_index_pe, edge_weight_pe, edge_type_pe = to_undirected_edge_index_with_weight(
+        original, num_nodes, edge_weight=edge_weight, edge_type=edge_type
+    )
+    graph_hash = _graph_hash(edge_index_pe, num_nodes, edge_weight_pe, edge_type_pe)
+    edge_type_hash = None
+    if edge_type_pe is not None:
+        edge_type_hash = hashlib.sha256(edge_type_pe.numpy().astype("<i8", copy=False).tobytes()).hexdigest()
     identity = {
         "cache_key": cache_key,
         "num_nodes": num_nodes,
@@ -296,6 +404,8 @@ def compute_sparse_laplacian_eigenpairs(
         "normalization": normalization,
         "message_graph_is_directed": bool(is_directed),
         "pe_graph_is_undirected": True,
+        "weighted_pe": edge_weight is not None,
+        "edge_type_pe_hash": edge_type_hash,
         "pe_version": str(pe_version),
     }
     if metadata_extra:
@@ -310,7 +420,7 @@ def compute_sparse_laplacian_eigenpairs(
         if path.exists():
             return _from_cache(path, identity)
 
-    values, vectors = _solve_smallest(_laplacian(edge_index_pe, num_nodes, normalization), k)
+    values, vectors = _solve_smallest(_laplacian(edge_index_pe, num_nodes, normalization, edge_weight_pe), k)
     valid_count = min(k, values.shape[0])
     padded_values = np.zeros(k, dtype=np.float32)
     padded_vectors = np.zeros((num_nodes, k), dtype=np.float32)
@@ -327,6 +437,8 @@ def compute_sparse_laplacian_eigenpairs(
         mask=torch.from_numpy(mask),
         edge_index_pe=edge_index_pe,
         metadata=identity,
+        edge_weight_pe=edge_weight_pe,
+        edge_type_pe=edge_type_pe,
     )
     _validate_result(result, num_nodes, k)
     if path is not None:
@@ -335,14 +447,18 @@ def compute_sparse_laplacian_eigenpairs(
         path = _cache_path(Path(cache_dir), str(cache_key), {
             key: value for key, value in cache_identity.items() if key != "num_computed"
         })
-        np.savez_compressed(
-            path,
-            eigvals=result.eigvals.numpy(),
-            eigvecs=result.eigvecs.numpy(),
-            mask=result.mask.numpy(),
-            edge_index_pe=result.edge_index_pe.numpy(),
-            metadata_json=np.asarray(json.dumps(cache_identity, sort_keys=True)),
-        )
+        cache_payload = {
+            "eigvals": result.eigvals.numpy(),
+            "eigvecs": result.eigvecs.numpy(),
+            "mask": result.mask.numpy(),
+            "edge_index_pe": result.edge_index_pe.numpy(),
+            "metadata_json": np.asarray(json.dumps(cache_identity, sort_keys=True)),
+        }
+        if result.edge_weight_pe is not None:
+            cache_payload["edge_weight_pe"] = result.edge_weight_pe.numpy()
+        if result.edge_type_pe is not None:
+            cache_payload["edge_type_pe"] = result.edge_type_pe.numpy()
+        np.savez_compressed(path, **cache_payload)
     return result
 
 
@@ -391,6 +507,8 @@ def prepare_hierarchy_lappe(
         cache_dir=cache_dir,
         pe_version=pe_version,
         metadata_extra=metadata_extra,
+        edge_weight=graph.edge_weight,
+        edge_type=graph.edge_type,
     )
     if joint.metadata.get("joint_graph_hash") != graph.joint_graph_hash:
         raise ValueError("严格模式: LapPE joint_graph_hash 与联合消息图不一致")

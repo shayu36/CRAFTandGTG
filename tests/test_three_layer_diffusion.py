@@ -509,3 +509,16 @@ def test_tiny_end_to_end_rag_region_syntax_road_generation_ignores_future():
     assert all(torch.isfinite(result[f"generated_{layer}"]).all() for layer in ("region", "syntax", "road"))
     for layer in ("region", "syntax", "road"):
         assert torch.equal(result[f"generated_{layer}"], changed[f"generated_{layer}"])
+
+
+def test_none_normalizer_is_identity_and_inverse_is_finite(tmp_path):
+    path = tmp_path / "none.json"
+    path.write_text(json.dumps({
+        "format_version": "three-layer-rag-dynamics-v1",
+        "mode": "none",
+        "layers": {},
+    }), encoding="utf-8")
+    normalizer = DynamicNormalizer.load(path)
+    value = normalizer.inverse("region", torch.full((1, 2, 4), 1000.0))
+    assert torch.isfinite(value).all()
+    assert torch.equal(value, torch.full((1, 2, 4), 1000.0))

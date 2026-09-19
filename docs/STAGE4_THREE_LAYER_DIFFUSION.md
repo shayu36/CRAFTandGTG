@@ -267,6 +267,10 @@ python scripts/generate_three_layer_diffusion.py \
 - 真实物理空间 MAE/RMSE；
 - Diffusion 输出到 GTG 轨迹解码的对接。
 
-当前主要工程风险是 RAG 对 source memory 在线重算 key 的吞吐与显存。开始长训练前
-应先用少量真实 snapshot 做 GPU 性能 smoke，再在不破坏 trainable key encoder 和
-Leave-One-City-Out 的前提下设计分块检索或可审计 cache。
+当前实现已采用分块、分城市 Top-K 检索；source key 在训练阶段保持可微在线计算，
+在 eval/generation 阶段按 memory/device/dtype 缓存。仍需在正式三城 GPU 训练前进行
+少量性能 smoke，确认实际 batch 与显存配置。
+
+Stage-4 验证使用固定的 timestep/noise bank（不启用随机 self-conditioning），因此
+best checkpoint 和 scheduler 监控的是可重复的 normalized epsilon loss。恢复训练会
+恢复 optimizer、scheduler、EMA、RNG、best metric 与 history。

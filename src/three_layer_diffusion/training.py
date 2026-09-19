@@ -14,7 +14,7 @@ from torch import nn
 from .model import DIFFUSION_CONTRACT_VERSION, ThreeLayerRAGDiffusionSystem
 
 
-DIFFUSION_CHECKPOINT_VERSION = "three-layer-rag-diffusion-checkpoint-v1"
+DIFFUSION_CHECKPOINT_VERSION = "three-layer-rag-diffusion-checkpoint-v2"
 
 
 class ModelEMA(nn.Module):
@@ -133,6 +133,8 @@ def save_diffusion_checkpoint(
     config: Mapping[str, Any],
     identity: Mapping[str, Any],
     seed: int,
+    best_metric: float | None = None,
+    history: list[Mapping[str, Any]] | None = None,
 ) -> Path:
     _require_checkpoint_identity(identity)
     payload = {
@@ -148,8 +150,11 @@ def save_diffusion_checkpoint(
         "config": copy.deepcopy(dict(config)),
         "identity": copy.deepcopy(dict(identity)),
         "random_seed": int(seed),
+        "best_metric": None if best_metric is None else float(best_metric),
+        "history": copy.deepcopy(list(history or [])),
         "rng_state": {
             "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             "numpy": np.random.get_state(),
             "python": random.getstate(),
         },
@@ -169,6 +174,7 @@ def load_diffusion_checkpoint(
     scheduler: Any = None,
     expected_identity: Mapping[str, Any] | None = None,
     use_ema_weights: bool = False,
+    restore_rng: bool = True,
 ) -> dict[str, Any]:
     payload = torch.load(Path(path), map_location="cpu", weights_only=False)
     if not isinstance(payload, Mapping):
@@ -195,4 +201,14 @@ def load_diffusion_checkpoint(
         optimizer.load_state_dict(payload["optimizer_state"])
     if scheduler is not None and payload.get("scheduler_state") is not None:
         scheduler.load_state_dict(payload["scheduler_state"])
+    if restore_rng and isinstance(payload.get("rng_state"), Mapping):
+        rng_state = payload["rng_state"]
+        if isinstance(rng_state.get("torch"), torch.Tensor):
+            torch.set_rng_state(rng_state["torch"])
+        if torch.cuda.is_available() and isinstance(rng_state.get("cuda"), (list, tuple)):
+            torch.cuda.set_rng_state_all(rng_state["cuda"])
+        if rng_state.get("numpy") is not None:
+            np.random.set_state(rng_state["numpy"])
+        if rng_state.get("python") is not None:
+            random.setstate(rng_state["python"])
     return dict(payload)

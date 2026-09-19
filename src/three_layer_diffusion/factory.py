@@ -4,9 +4,37 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from three_layer_rag import HierarchicalThreeLayerRAG
+from three_layer_rag import HierarchicalThreeLayerRAG, RAG_CONTRACT_VERSION
 
-from .model import HierarchicalThreeLayerDiffusion, ThreeLayerRAGDiffusionSystem
+from .model import (
+    DIFFUSION_CONTRACT_VERSION,
+    HierarchicalThreeLayerDiffusion,
+    ThreeLayerRAGDiffusionSystem,
+)
+
+
+def validate_stage4_config(config: Mapping[str, Any]) -> None:
+    """Fail early on cross-module contract mismatches instead of partial builds."""
+
+    if not isinstance(config.get("rag"), Mapping) or not isinstance(config.get("diffusion"), Mapping):
+        raise ValueError("Stage-4 配置必须包含 rag/diffusion mapping")
+    rag, diffusion = config["rag"], config["diffusion"]
+    if rag.get("contract_version") != RAG_CONTRACT_VERSION:
+        raise ValueError("RAG contract_version 与实现不匹配")
+    if diffusion.get("contract_version") != DIFFUSION_CONTRACT_VERSION:
+        raise ValueError("Diffusion contract_version 与实现不匹配")
+    if int(rag.get("seq_length", -1)) != int(diffusion.get("seq_length", -2)):
+        raise ValueError("RAG/Diffusion seq_length 必须一致")
+    expected_channels = {"road": 3, "syntax": 3, "region": 2}
+    if {str(k): int(v) for k, v in rag.get("temporal_channels", {}).items()} != expected_channels:
+        raise ValueError("RAG temporal_channels 必须为 road=3/syntax=3/region=2")
+    condition = diffusion.get("condition", {})
+    if int(condition.get("high_dim", 0)) <= 0 or int(condition.get("cond_dim", 0)) <= 0:
+        raise ValueError("Diffusion condition high_dim/cond_dim 必须为正")
+    if int(diffusion.get("sampling_time_steps", 0)) > int(diffusion.get("time_steps", 0)):
+        raise ValueError("sampling_time_steps 不能大于 time_steps")
+    if set(diffusion.get("layer_loss_weights", {})) != {"road", "syntax", "region"}:
+        raise ValueError("layer_loss_weights 必须覆盖三层")
 
 
 def build_rag_model(config: Mapping[str, Any]) -> HierarchicalThreeLayerRAG:
@@ -27,6 +55,8 @@ def build_rag_model(config: Mapping[str, Any]) -> HierarchicalThreeLayerRAG:
         match_holiday=bool(rag.get("match_holiday", False)),
         require_value_separation=bool(rag.get("require_value_separation", True)),
         expected_graph_identity=None,
+        candidate_chunk_size=int(rag.get("candidate_chunk_size", 4096)),
+        city_top_k=None if rag.get("city_top_k") is None else int(rag["city_top_k"]),
     )
 
 
@@ -63,4 +93,5 @@ def build_diffusion_model(config: Mapping[str, Any]) -> HierarchicalThreeLayerDi
 
 
 def build_system(config: Mapping[str, Any]) -> ThreeLayerRAGDiffusionSystem:
+    validate_stage4_config(config)
     return ThreeLayerRAGDiffusionSystem(build_rag_model(config), build_diffusion_model(config))

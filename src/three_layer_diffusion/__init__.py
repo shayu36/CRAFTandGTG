@@ -20,7 +20,7 @@ from .data import (
     load_stage2_high_features,
     validate_runtime_identities,
 )
-from .factory import build_diffusion_model, build_rag_model, build_system
+from .factory import build_diffusion_model, build_rag_model, build_system, validate_stage4_config
 from .gaussian_diffusion import (
     ConditionalGaussianDiffusion1D,
     DiffusionPrediction,
@@ -71,6 +71,7 @@ __all__ = [
     "build_diffusion_model",
     "build_rag_model",
     "build_system",
+    "validate_stage4_config",
     "collate_city_graph_bucket",
     "cosine_beta_schedule",
     "extract",

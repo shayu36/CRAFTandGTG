@@ -29,6 +29,8 @@ rag:
   match_holiday: false
   require_value_separation: true
   require_graph_identity: true
+  candidate_chunk_size: 4096
+  city_top_k: 5
 
 data:
   source_cities:

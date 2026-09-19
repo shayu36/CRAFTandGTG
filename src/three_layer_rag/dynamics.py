@@ -509,11 +509,15 @@ def normalize_hourly_dynamics(
     channels = {"road": 3, "syntax": 3, "region": 2}
     if normalizer is None:
         if mode == "none":
+            identity_layers = {
+                layer: {"mean": [0.0] * count, "std": [1.0] * count}
+                for layer, count in channels.items()
+            }
             fitted: dict[str, Any] = {
                 "format_version": DYNAMIC_FEATURE_VERSION,
                 "mode": "none",
                 "fit_cities": sorted(cities),
-                "layers": {},
+                "layers": identity_layers,
             }
         else:
             layer_stats: dict[str, dict[str, list[float]]] = {}
@@ -567,6 +571,7 @@ def normalize_hourly_dynamics(
             "mode": mode,
             "fit_cities": list(fitted.get("fit_cities", [])),
             "source_train_only": normalizer is None,
+            "layers": dict(fitted.get("layers", {})),
         }
         normalized[city_id] = HourlyThreeLayerDynamics(dynamics.timestamps, values, metadata)
     return normalized, fitted

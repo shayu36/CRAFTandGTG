@@ -20,6 +20,7 @@ from three_layer_graphgps.frequency import (
 from three_layer_graphgps.model import ThreeLayerGraphGPSLapPE
 from three_layer_graphgps.spectral_lap_pe import (
     LaplacianEigenpairs,
+    compute_sparse_laplacian_eigenpairs,
     prepare_hierarchy_lappe,
 )
 
@@ -234,3 +235,17 @@ def test_target_static_prepare_does_not_load_flow(monkeypatch):
         seq_length=24,
     )
     assert prepared.targets is None
+
+
+def test_lappe_preserves_weighted_undirected_spectrum_inputs():
+    edge_index = torch.tensor([[0, 1, 1], [1, 0, 2]], dtype=torch.long)
+    edge_weight = torch.tensor([2.0, 3.0, 4.0])
+    edge_type = torch.tensor([0, 1, 2], dtype=torch.long)
+    result = compute_sparse_laplacian_eigenpairs(
+        edge_index, 3, 2, edge_weight=edge_weight, edge_type=edge_type
+    )
+    assert result.edge_weight_pe is not None
+    assert result.edge_type_pe is not None
+    assert torch.allclose(result.edge_weight_pe, torch.tensor([5.0, 5.0, 4.0, 4.0], dtype=result.edge_weight_pe.dtype))
+    assert result.metadata["weighted_pe"] is True
+    assert result.metadata["edge_type_pe_hash"]
