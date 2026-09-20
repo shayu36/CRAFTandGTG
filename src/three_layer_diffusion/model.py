@@ -53,6 +53,7 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
         ddim_sampling_eta: float = 0.0,
         use_self_cond: bool = True,
         clip_x0: bool = False,
+        sampling_x0_clip: float | None = None,
         self_condition_probability: float = 0.5,
         init_dim: int = 64,
         base_dim: int = 32,
@@ -125,6 +126,7 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
                 ddim_sampling_eta=ddim_sampling_eta,
                 use_self_cond=use_self_cond,
                 clip_x0=clip_x0,
+                sampling_x0_clip=sampling_x0_clip,
                 self_condition_probability=self_condition_probability,
                 gradient_checkpointing=gradient_checkpointing,
             )

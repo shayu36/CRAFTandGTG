@@ -360,14 +360,19 @@ def main() -> None:
             and (epoch + 1) % int(generation_cfg.get("every_epochs", 10)) == 0
         ):
             count = min(len(validation), int(generation_cfg.get("max_snapshots", 1)))
-            record["physical_generation"] = _evaluate_generation(
-                ema.ema_model,
-                validation[:count],
-                high,
-                memory,
-                normalizer,
-                config["evaluation"]["layer_weights"],
-            )
+            try:
+                record["physical_generation"] = _evaluate_generation(
+                    ema.ema_model,
+                    validation[:count],
+                    high,
+                    memory,
+                    normalizer,
+                    config["evaluation"]["layer_weights"],
+                )
+            except (FloatingPointError, ValueError) as error:
+                record["physical_generation_error"] = (
+                    f"{type(error).__name__}: {error}"
+                )
         history.append(record)
         print(json.dumps(record, ensure_ascii=False))
         improved = validation_metrics["normalized_noise_loss"] < best

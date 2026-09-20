@@ -64,6 +64,7 @@ class ConditionalGaussianDiffusion1D(nn.Module):
         ddim_sampling_eta: float = 0.0,
         use_self_cond: bool = True,
         clip_x0: bool = False,
+        sampling_x0_clip: float | None = None,
         self_condition_probability: float = 0.5,
         gradient_checkpointing: bool = False,
     ):
@@ -84,6 +85,13 @@ class ConditionalGaussianDiffusion1D(nn.Module):
         self.ddim_sampling_eta = float(ddim_sampling_eta)
         self.use_self_cond = bool(use_self_cond)
         self.clip_x0 = bool(clip_x0)
+        if sampling_x0_clip is not None and (
+            not math.isfinite(float(sampling_x0_clip)) or float(sampling_x0_clip) <= 0
+        ):
+            raise ValueError("sampling_x0_clip 必须为正有限值或 null")
+        self.sampling_x0_clip = (
+            None if sampling_x0_clip is None else float(sampling_x0_clip)
+        )
         self.self_condition_probability = float(self_condition_probability)
         self.gradient_checkpointing = bool(gradient_checkpointing)
 
@@ -281,6 +289,8 @@ class ConditionalGaussianDiffusion1D(nn.Module):
         value = initial_noise
         x_start = None
         for step in reversed(range(self.time_steps)):
+            if self.sampling_x0_clip is not None:
+                value = value.clamp(-self.sampling_x0_clip, self.sampling_x0_clip)
             timesteps = torch.full(
                 (value.shape[0],), step, device=value.device, dtype=torch.long
             )
@@ -290,6 +300,13 @@ class ConditionalGaussianDiffusion1D(nn.Module):
                 condition,
                 x_start if self.use_self_cond else None,
             )
+            if self.sampling_x0_clip is not None:
+                pred_x0 = prediction.pred_x0.clamp(
+                    -self.sampling_x0_clip, self.sampling_x0_clip
+                )
+                prediction = DiffusionPrediction(
+                    self.predict_noise_from_start(value, timesteps, pred_x0), pred_x0
+                )
             mean, _, log_variance = self.q_posterior(
                 prediction.pred_x0, value, timesteps
             )
@@ -309,6 +326,8 @@ class ConditionalGaussianDiffusion1D(nn.Module):
         value = initial_noise
         x_start = None
         for step, next_step in pairs:
+            if self.sampling_x0_clip is not None:
+                value = value.clamp(-self.sampling_x0_clip, self.sampling_x0_clip)
             timesteps = torch.full(
                 (value.shape[0],), step, device=value.device, dtype=torch.long
             )
@@ -318,6 +337,13 @@ class ConditionalGaussianDiffusion1D(nn.Module):
                 condition,
                 x_start if self.use_self_cond else None,
             )
+            if self.sampling_x0_clip is not None:
+                pred_x0 = prediction.pred_x0.clamp(
+                    -self.sampling_x0_clip, self.sampling_x0_clip
+                )
+                prediction = DiffusionPrediction(
+                    self.predict_noise_from_start(value, timesteps, pred_x0), pred_x0
+                )
             x_start = prediction.pred_x0
             if next_step < 0:
                 value = x_start

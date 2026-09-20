@@ -79,6 +79,10 @@ def build_diffusion_model(config: Mapping[str, Any]) -> HierarchicalThreeLayerDi
         ddim_sampling_eta=float(diffusion["ddim_sampling_eta"]),
         use_self_cond=bool(diffusion["use_self_cond"]),
         clip_x0=bool(diffusion.get("clip_x0", False)),
+        sampling_x0_clip=(
+            None if diffusion.get("sampling_x0_clip") is None
+            else float(diffusion["sampling_x0_clip"])
+        ),
         self_condition_probability=float(diffusion.get("self_condition_probability", 0.5)),
         init_dim=int(unet["init_dim"]),
         base_dim=int(unet["base_dim"]),

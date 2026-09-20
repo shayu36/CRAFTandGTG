@@ -51,13 +51,15 @@ diffusion:
   contract_version: three-layer-hierarchical-conditional-diffusion-v1
   seq_length: 24
   time_steps: 500
-  sampling_time_steps: 500
+  sampling_time_steps: 100
   beta_schedule: linear
   ddim_sampling_eta: 0.0
   use_self_cond: true
   self_condition_probability: 0.5
   # log1p_zscore has no fixed [-1,1] support.
   clip_x0: false
+  # Sampling-only stability bound for log1p_zscore trajectories; training remains unclipped.
+  sampling_x0_clip: 8.0
   layer_loss_weights:
     region: 1.0
     syntax: 1.0
