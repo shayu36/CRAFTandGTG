@@ -27,9 +27,8 @@ source-train normalizer inverse
 physical three-layer dynamics
 ```
 
-Stage 4 的代码、配置、训练/生成 CLI、unit tests 和 tiny synthetic smoke test 已完成。
-截至本文档更新时尚未启动耗时的真实三城联合训练，因此没有 Stage 4 真实 checkpoint、
-生成样本或城市指标。legacy `src/hcfm/` 仍保留用于历史实验，但不属于当前主路线。
+Stage 4 的代码、配置、训练/生成 CLI、unit tests 和低显存单卡 smoke 已完成，并已生成
+当前 Stage 4 smoke checkpoint。legacy `src/hcfm/` 仍保留，但不属于当前主路线。
 
 ## 2. 原始 CRAFT Diffusion 调用链
 
@@ -232,13 +231,17 @@ MAE/RMSE、三层加权指标，以及 DDPM/DDIM 的真实采样步数。
 
 ## 10. 命令
 
-联合训练：
+五卡联合训练（长期任务放入 tmux）：
 
 ```bash
-python scripts/train_three_layer_diffusion.py \
+torchrun --standalone --nproc_per_node=5 scripts/train_three_layer_diffusion.py \
   --config configs/stage4_three_layer_diffusion.yaml \
   --device cuda:0
 ```
+
+当前低显存配置为 `node_chunk_size=64`、`gradient_checkpointing=true`、
+`train_source_keys=false`、`source_cache_device=cpu`。各 rank 按 city bucket 分发
+batch，反向后显式 all-reduce/average 梯度；仅 rank 0 验证、保存 checkpoint 和写日志。
 
 可先限制 snapshot/epoch 做本地性能检查：
 
@@ -264,16 +267,21 @@ python scripts/generate_three_layer_diffusion.py \
 
 ## 11. 当前验证边界与风险
 
-已完成的验证是 unit tests 与 tiny synthetic end-to-end smoke。尚未运行：
+已完成：
 
-- 三城 Stage 4 正式 GPU 训练；
+- 单卡低显存 Stage 4 1 epoch smoke；
+- Stage 4、RAG、retriever 严格契约、节点分块、CPU source-cache 和 gradient checkpointing 定向测试，共 36 passed；
+- 五卡 `torchrun` smoke 已完成，`EXIT_CODE=0`。
+
+仍待完成：
+
+- 三城 Stage 4 正式长训练的最终 loss 和生成指标；
 - 真实 eval snapshot 的完整 500-step 生成；
-- 真实物理空间 MAE/RMSE；
 - Diffusion 输出到 GTG 轨迹解码的对接。
 
-当前实现已采用分块、分城市 Top-K 检索；source key 在训练阶段保持可微在线计算，
-在 eval/generation 阶段按 memory/device/dtype 缓存。仍需在正式三城 GPU 训练前进行
-少量性能 smoke，确认实际 batch 与显存配置。
+source key 在当前正式低显存配置中使用 detached CPU cache；RAG query、Diffusion 和 EMA
+仍参与训练。验证使用固定 timestep/noise bank，best checkpoint 和 scheduler 监控可重复
+的 normalized epsilon loss。
 
 Stage-4 验证使用固定的 timestep/noise bank（不启用随机 self-conditioning），因此
 best checkpoint 和 scheduler 监控的是可重复的 normalized epsilon loss。恢复训练会
