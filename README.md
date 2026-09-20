@@ -83,4 +83,4 @@ torchrun --standalone --nproc_per_node=5 scripts/train_three_layer_diffusion.py 
 
 最近一次定向回归为 `36 passed`，覆盖 Stage 4 Diffusion、RAG、retriever 严格契约、节点分块、CPU source-cache 和梯度检查点路径。`graph_tool` 全量测试仍受外部 `GOMP_5.0` ABI 约束。
 
-详细状态见 [docs/CODE_STATUS.md](docs/CODE_STATUS.md) 和 [docs/RUN_RESULTS.md](docs/RUN_RESULTS.md)。
+当前完整建模流程见 [docs/THREE_LAYER_MODELING_PIPELINE.md](docs/THREE_LAYER_MODELING_PIPELINE.md)，Word 版见 [docs/THREE_LAYER_MODELING_PIPELINE.docx](docs/THREE_LAYER_MODELING_PIPELINE.docx)。运行状态见 [docs/CODE_STATUS.md](docs/CODE_STATUS.md)，实际结果见 [docs/RUN_RESULTS.md](docs/RUN_RESULTS.md)。
