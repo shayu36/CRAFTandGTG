@@ -17,12 +17,17 @@ import torch
 
 LAYER_NAMES = ("road", "syntax", "region")
 PARENT_NAMES = ("road_to_syntax", "syntax_to_region")
-RAG_CONTRACT_VERSION = "three-layer-hierarchical-rag-v2"
+RAG_CONTRACT_VERSION = "three-layer-hierarchical-rag-v3-weighted-stage2"
+SNAPSHOT_BUNDLE_VERSION = "three-layer-rag-snapshot-bundle-v2-weighted-stage2"
 GRAPH_IDENTITY_KEYS = (
     "joint_graph_hash",
     "checkpoint_fingerprint",
     "static_feature_version",
     "spectral_feature_version",
+    "lappe_version",
+    "weighted_pe",
+    "weighted_spectrum_hash",
+    "global_attention_scope",
     "road_node_range",
     "syntax_node_range",
     "region_node_range",

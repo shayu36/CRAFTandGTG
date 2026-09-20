@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -9,13 +10,124 @@ from typing import Any, Iterable, Mapping
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
-from .data import GraphGPSCityData, RegionFlowTargets
+from .data import (
+    GraphGPSCityData,
+    RegionFlowTargets,
+    build_joint_three_layer_graph,
+    validate_joint_three_layer_graph,
+)
 from .model import ThreeLayerGraphGPSLapPE
+from .spectral_lap_pe import LAPPE_VERSION, weighted_pe_graph_hash
 
 
-CHECKPOINT_VERSION = "three-layer-joint-graphgps-spectral-checkpoint-v3"
+CHECKPOINT_VERSION = "three-layer-joint-graphgps-weighted-spectral-checkpoint-v4"
+
+
+def stage2_graph_identities(
+    city_data: Iterable[GraphGPSCityData],
+) -> dict[str, dict[str, Any]]:
+    """Return the exact per-city graph/spectrum identity used by Stage 2."""
+
+    identities: dict[str, dict[str, Any]] = {}
+    for data in city_data:
+        city_id = data.hierarchy.city_id
+        if not isinstance(city_id, str) or not city_id or city_id in identities:
+            raise ValueError("严格模式: Stage 2 graph identity 的 city_id 为空或重复")
+        joint = data.joint_graph or build_joint_three_layer_graph(data.hierarchy)
+        validate_joint_three_layer_graph(joint)
+        spectrum_hash = weighted_pe_graph_hash(
+            joint.edge_index_joint,
+            joint.num_nodes,
+            joint.edge_weight,
+            joint.edge_type,
+        )
+        metadata = data.posenc.metadata
+        if metadata.get("pe_version") != LAPPE_VERSION:
+            raise ValueError(f"严格模式: {city_id} 不是当前 weighted LapPE version")
+        if metadata.get("weighted_pe") is not True:
+            raise ValueError(f"严格模式: {city_id} 未使用 weighted LapPE")
+        if metadata.get("joint_graph_hash") != joint.joint_graph_hash:
+            raise ValueError(f"严格模式: {city_id} LapPE/message graph identity 不一致")
+        if metadata.get("weighted_spectrum_hash") != spectrum_hash:
+            raise ValueError(f"严格模式: {city_id} weighted spectrum identity 不一致")
+        identities[city_id] = {
+            "city_id": city_id,
+            "joint_graph_hash": joint.joint_graph_hash,
+            "weighted_spectrum_hash": spectrum_hash,
+            "num_joint_nodes": joint.num_nodes,
+            "road_node_range": list(joint.road_node_range),
+            "syntax_node_range": list(joint.syntax_node_range),
+            "region_node_range": list(joint.region_node_range),
+            "lappe_version": LAPPE_VERSION,
+            "weighted_pe": True,
+        }
+    if not identities:
+        raise ValueError("严格模式: Stage 2 checkpoint 至少需要一个训练图 identity")
+    return {city: identities[city] for city in sorted(identities)}
+
+
+def _graph_identities_fingerprint(identities: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        identities,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_serialized_graph_identities(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("严格模式: checkpoint 缺少 training_graph_identities")
+    normalized: dict[str, dict[str, Any]] = {}
+    for city_id, row in value.items():
+        if not isinstance(city_id, str) or not city_id or not isinstance(row, Mapping):
+            raise ValueError("严格模式: checkpoint training_graph_identities 格式非法")
+        if row.get("city_id") != city_id:
+            raise ValueError("严格模式: checkpoint graph identity city_id 不一致")
+        for key in ("joint_graph_hash", "weighted_spectrum_hash"):
+            digest = row.get(key)
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest.lower())
+            ):
+                raise ValueError(f"严格模式: checkpoint {city_id}.{key} 不是 SHA-256")
+        if row.get("lappe_version") != LAPPE_VERSION or row.get("weighted_pe") is not True:
+            raise ValueError("严格模式: checkpoint graph identity 不是当前 weighted LapPE")
+        num_nodes = row.get("num_joint_nodes")
+        ranges = [
+            row.get(name)
+            for name in ("road_node_range", "syntax_node_range", "region_node_range")
+        ]
+        if not isinstance(num_nodes, int) or num_nodes <= 0:
+            raise ValueError("严格模式: checkpoint num_joint_nodes 非法")
+        if not all(isinstance(item, (list, tuple)) and len(item) == 2 for item in ranges):
+            raise ValueError("严格模式: checkpoint 节点范围非法")
+        canonical_ranges = [[int(item[0]), int(item[1])] for item in ranges]
+        if (
+            canonical_ranges[0][0] != 0
+            or canonical_ranges[0][1] != canonical_ranges[1][0]
+            or canonical_ranges[1][1] != canonical_ranges[2][0]
+            or canonical_ranges[2][1] != num_nodes
+            or any(start >= end for start, end in canonical_ranges)
+        ):
+            raise ValueError("严格模式: checkpoint 节点范围不连续")
+        normalized[city_id] = {
+            "city_id": city_id,
+            "joint_graph_hash": row["joint_graph_hash"],
+            "weighted_spectrum_hash": row["weighted_spectrum_hash"],
+            "num_joint_nodes": num_nodes,
+            "road_node_range": canonical_ranges[0],
+            "syntax_node_range": canonical_ranges[1],
+            "region_node_range": canonical_ranges[2],
+            "lappe_version": LAPPE_VERSION,
+            "weighted_pe": True,
+        }
+    return {city: normalized[city] for city in sorted(normalized)}
 
 
 def _checkpoint_contract(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -31,11 +143,15 @@ def _checkpoint_contract(config: Mapping[str, Any]) -> dict[str, Any]:
         "hidden_dim": int(model_cfg.get("hidden_dim", 128)),
         "output_dim": int(model_cfg.get("output_dim", 48)),
         "joint_num_eig": int(pos_cfg.get("joint_num_eig", 16)),
+        "laplacian_norm": pos_cfg.get("laplacian_norm", "sym"),
+        "lappe_version": LAPPE_VERSION,
+        "weighted_pe": True,
         "frequency_method": frequency_cfg.get("method"),
         "decomposition_position": frequency_cfg.get("decomposition_position"),
         "joint_low_modes": int(frequency_cfg.get("joint_low_modes", 16)),
         "frequency_output_version": frequency_cfg.get("output_version"),
         "global_attn": attention_cfg.get("global_attn", "linear"),
+        "global_attention_scope": attention_cfg.get("global_attention_scope", "joint"),
         "full_attention_max_nodes": int(attention_cfg.get("full_attention_max_nodes", 4096)),
         "static_feature_version": data_cfg.get("hierarchy_feature_version"),
         "seq_length": int(data_cfg.get("seq_length", 24)),
@@ -175,11 +291,13 @@ def save_checkpoint(
     model: ThreeLayerGraphGPSLapPE,
     optimizer: torch.optim.Optimizer | None,
     config: Mapping[str, Any],
+    training_graph_identities: Mapping[str, Any],
     epoch: int,
     best_valid_rmse: float,
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    graph_identities = _validate_serialized_graph_identities(training_graph_identities)
     torch.save(
         {
             "format_version": CHECKPOINT_VERSION,
@@ -187,6 +305,8 @@ def save_checkpoint(
             "optimizer": optimizer.state_dict() if optimizer is not None else None,
             "config": dict(config),
             "contract": _checkpoint_contract(config),
+            "training_graph_identities": graph_identities,
+            "training_graph_identities_sha256": _graph_identities_fingerprint(graph_identities),
             "epoch": int(epoch),
             "best_valid_rmse": float(best_valid_rmse),
         },
@@ -200,14 +320,26 @@ def load_checkpoint(
     model: ThreeLayerGraphGPSLapPE,
     optimizer: torch.optim.Optimizer | None = None,
     expected_config: Mapping[str, Any] | None = None,
+    expected_graph_identities: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = torch.load(Path(path), map_location="cpu", weights_only=False)
     if state.get("format_version") != CHECKPOINT_VERSION:
-        raise ValueError("严格模式: 不是 three-layer-joint-graphgps-spectral-checkpoint-v3")
+        raise ValueError(f"严格模式: 不是 {CHECKPOINT_VERSION}；旧无权 LapPE checkpoint 不得加载")
     if state.get("contract") != _checkpoint_contract(state.get("config", {})):
         raise ValueError("严格模式: checkpoint 内部 config/contract 不一致")
     if expected_config is not None and state.get("contract") != _checkpoint_contract(expected_config):
         raise ValueError("严格模式: checkpoint 与当前 Stage 2 配置不匹配")
+    graph_identities = _validate_serialized_graph_identities(
+        state.get("training_graph_identities")
+    )
+    if state.get("training_graph_identities_sha256") != _graph_identities_fingerprint(
+        graph_identities
+    ):
+        raise ValueError("严格模式: checkpoint training graph identity 摘要不一致")
+    if expected_graph_identities is not None:
+        expected = _validate_serialized_graph_identities(expected_graph_identities)
+        if graph_identities != expected:
+            raise ValueError("严格模式: checkpoint 与当前训练城市 graph/spectrum identity 不匹配")
     model.load_state_dict(state["model"], strict=True)
     if optimizer is not None and state.get("optimizer") is not None:
         optimizer.load_state_dict(state["optimizer"])
@@ -247,13 +379,41 @@ def train_and_evaluate(
     best_path, last_path = output_dir / "best.pt", output_dir / "last.pt"
     history, best_valid = [], float("inf")
     first_shapes = None
+    graph_identities = stage2_graph_identities(city_data)
+    distributed = dist.is_available() and dist.is_initialized()
+    rank = dist.get_rank() if distributed else 0
+    world_size = dist.get_world_size() if distributed else 1
+
+    def sync_gradients() -> None:
+        if not distributed:
+            return
+        # DDP cannot wrap this model directly because the training call uses
+        # custom graph objects instead of Module.forward(). Average gradients
+        # explicitly while keeping all ranks on the same optimizer step.
+        for parameter in model.parameters():
+            gradient = parameter.grad
+            if gradient is None:
+                gradient = torch.zeros_like(parameter)
+            dist.all_reduce(gradient, op=dist.ReduceOp.SUM)
+            gradient.div_(world_size)
+            parameter.grad = gradient
 
     for epoch in range(epochs):
         model.train()
         order = list(range(len(city_data)))
         random.shuffle(order)
         train_losses = []
-        for index in order:
+        if distributed:
+            # Every rank performs the same number of optimizer steps. The
+            # cyclic schedule keeps all five GPUs active even though the
+            # source-only Stage 2 set contains three cities.
+            local_order = [
+                order[(step * world_size + rank) % len(order)]
+                for step in range(len(order))
+            ]
+        else:
+            local_order = order
+        for index in local_order:
             data = city_data[index]
             if data.targets is None:
                 raise ValueError(f"严格模式: source {data.hierarchy.city_id} 缺少 targets")
@@ -261,16 +421,28 @@ def train_and_evaluate(
             output = model(data.hierarchy, data.posenc)
             loss = region_prediction_loss(output["pred"], data.targets["train"])
             loss.backward()
+            sync_gradients()
             for name, parameter in model.named_parameters():
                 if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
                     raise FloatingPointError(f"严格模式: 参数 {name} 梯度含 NaN/Inf")
             optimizer.step()
-            train_losses.append(float(loss.detach().cpu()))
-            if first_shapes is None:
+            metric_loss = loss.detach()
+            if distributed:
+                dist.all_reduce(metric_loss, op=dist.ReduceOp.SUM)
+                metric_loss.div_(world_size)
+            train_losses.append(float(metric_loss.cpu()))
+            if rank == 0 and first_shapes is None:
                 first_shapes = shape_summary(data, output)
                 first_shapes["label"] = list(data.targets["train"].values.shape)
                 print(json.dumps({"shape_log": first_shapes}, ensure_ascii=False))
-        valid = evaluate_split(model, city_data, "valid")
+        if distributed:
+            dist.barrier()
+        valid = evaluate_split(model, city_data, "valid") if rank == 0 else None
+        if distributed:
+            dist.barrier()
+        if rank != 0:
+            continue
+        assert valid is not None
         row = {
             "epoch": epoch,
             "train_city_macro_mse": float(np.mean(train_losses)),
@@ -285,6 +457,7 @@ def train_and_evaluate(
                 model=model,
                 optimizer=optimizer,
                 config=config,
+                training_graph_identities=graph_identities,
                 epoch=epoch,
                 best_valid_rmse=best_valid,
             )
@@ -293,10 +466,20 @@ def train_and_evaluate(
         model=model,
         optimizer=optimizer,
         config=config,
+        training_graph_identities=graph_identities,
         epoch=epochs - 1,
         best_valid_rmse=best_valid,
+    ) if rank == 0 else None
+    if distributed:
+        dist.barrier()
+    if rank != 0:
+        return {"rank": rank, "world_size": world_size}
+    load_checkpoint(
+        best_path,
+        model=model,
+        expected_config=config,
+        expected_graph_identities=graph_identities,
     )
-    load_checkpoint(best_path, model=model, expected_config=config)
     metrics = {
         "checkpoint": str(best_path),
         "best_valid_rmse": best_valid,

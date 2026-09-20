@@ -10,7 +10,8 @@ import torch
 from .contracts import ThreeLayerRAGInputs
 
 
-STAGE2_SPECTRAL_VERSION = "three-layer-joint-graphgps-spectral-features-v2"
+STAGE2_SPECTRAL_VERSION = "three-layer-joint-graphgps-weighted-spectral-features-v3"
+STAGE2_LAPPE_VERSION = "three-layer-joint-lappe-v3-weighted"
 
 
 def load_stage2_low_features(
@@ -26,8 +27,15 @@ def load_stage2_low_features(
         raise ValueError("严格模式: Stage-2 spectral feature 必须是 mapping")
     if payload.get("format_version") != STAGE2_SPECTRAL_VERSION:
         raise ValueError(
-            "严格模式: RAG 只接受 three-layer-joint-graphgps-spectral-features-v2，旧 v1 不得混用"
+            f"严格模式: RAG 只接受 {STAGE2_SPECTRAL_VERSION}，旧无权谱特征不得混用"
         )
+    if payload.get("lappe_version") != STAGE2_LAPPE_VERSION or payload.get("weighted_pe") is not True:
+        raise ValueError("严格模式: RAG 只接受 weighted LapPE v3 特征")
+    spectrum_hash = payload.get("weighted_spectrum_hash")
+    if not isinstance(spectrum_hash, str) or len(spectrum_hash) != 64:
+        raise ValueError("严格模式: Stage-2 weighted_spectrum_hash 非法")
+    if payload.get("global_attention_scope") not in {"joint", "same_layer"}:
+        raise ValueError("严格模式: Stage-2 global_attention_scope 非法")
     if expected_city_id is not None and payload.get("city_id") != expected_city_id:
         raise ValueError("严格模式: Stage-2 feature city_id 不匹配")
     if (
@@ -54,7 +62,8 @@ def load_stage2_low_features(
         name: payload[name]
         for name in (
             "joint_graph_hash", "checkpoint_fingerprint", "static_feature_version",
-            "format_version", "road_node_range", "syntax_node_range", "region_node_range",
+            "format_version", "lappe_version", "weighted_pe", "weighted_spectrum_hash",
+            "global_attention_scope", "road_node_range", "syntax_node_range", "region_node_range",
         )
         if name in payload
     }

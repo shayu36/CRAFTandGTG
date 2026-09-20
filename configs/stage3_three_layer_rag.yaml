@@ -6,7 +6,7 @@ static_structure_mode: three_layer
 
 rag:
   name: three_layer_hierarchical_rag
-  contract_version: three-layer-hierarchical-rag-v2
+  contract_version: three-layer-hierarchical-rag-v3-weighted-stage2
   low_dim: 128                         # Stage-2 H_*_low hidden dimension
   seq_length: 24
   temporal_channels:
@@ -45,7 +45,7 @@ data:
   dynamic_snapshot_bundle: outputs/stage3_three_layer_rag/train_snapshots.pt
   dynamic_normalizer: outputs/stage3_three_layer_rag/train_snapshots.normalizer.json
   # 由 scripts/build_rag_memory.py 生成的本地 memory；不纳入版本控制。
-  memory_path: outputs/stage3_three_layer_rag/rag_memory_v2.pt
+  memory_path: outputs/stage3_three_layer_rag/rag_memory_v3.pt
   input_manifest: null
 
 hierarchy:

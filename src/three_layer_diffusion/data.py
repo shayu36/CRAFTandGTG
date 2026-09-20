@@ -12,10 +12,15 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 import torch
 from torch.utils.data import Dataset, Sampler
 
-from three_layer_rag import STAGE2_SPECTRAL_VERSION, ThreeLayerRAGInputs, ThreeLayerRAGMemory
+from three_layer_rag import (
+    STAGE2_LAPPE_VERSION,
+    STAGE2_SPECTRAL_VERSION,
+    SNAPSHOT_BUNDLE_VERSION,
+    ThreeLayerRAGInputs,
+    ThreeLayerRAGMemory,
+)
 
 
-SNAPSHOT_BUNDLE_VERSION = "three-layer-rag-snapshot-bundle-v1"
 DYNAMIC_FEATURE_VERSION = "three-layer-rag-dynamics-v1"
 CHANNEL_NAMES = {
     "road": ("passage_count", "speed_kmh", "travel_time_seconds"),
@@ -39,6 +44,10 @@ def _identity_from_spectral(payload: Mapping[str, Any]) -> dict[str, Any]:
         "checkpoint_fingerprint": payload.get("checkpoint_fingerprint"),
         "static_feature_version": payload.get("static_feature_version"),
         "spectral_feature_version": payload.get("format_version"),
+        "lappe_version": payload.get("lappe_version"),
+        "weighted_pe": payload.get("weighted_pe"),
+        "weighted_spectrum_hash": payload.get("weighted_spectrum_hash"),
+        "global_attention_scope": payload.get("global_attention_scope"),
         "road_node_range": tuple(payload.get("road_node_range", ())),
         "syntax_node_range": tuple(payload.get("syntax_node_range", ())),
         "region_node_range": tuple(payload.get("region_node_range", ())),
@@ -54,7 +63,14 @@ def load_stage2_high_features(
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     payload = torch.load(Path(path), map_location="cpu", weights_only=False)
     if not isinstance(payload, Mapping) or payload.get("format_version") != STAGE2_SPECTRAL_VERSION:
-        raise ValueError("严格模式: Diffusion 只接受 Stage-2 joint GraphGPS spectral v2")
+        raise ValueError(f"严格模式: Diffusion 只接受 {STAGE2_SPECTRAL_VERSION}")
+    if payload.get("lappe_version") != STAGE2_LAPPE_VERSION or payload.get("weighted_pe") is not True:
+        raise ValueError("严格模式: Diffusion 只接受 weighted LapPE v3 特征")
+    spectrum_hash = payload.get("weighted_spectrum_hash")
+    if not isinstance(spectrum_hash, str) or len(spectrum_hash) != 64:
+        raise ValueError("严格模式: Stage-2 weighted_spectrum_hash 非法")
+    if payload.get("global_attention_scope") not in {"joint", "same_layer"}:
+        raise ValueError("严格模式: Stage-2 global_attention_scope 非法")
     identity = _identity_from_spectral(payload)
     if expected_city_id is not None and identity["city_id"] != expected_city_id:
         raise ValueError("严格模式: high feature city_id 不匹配")
@@ -62,8 +78,9 @@ def load_stage2_high_features(
         expected = dict(expected_graph_metadata)
         for key in (
             "joint_graph_hash", "checkpoint_fingerprint", "static_feature_version",
-            "spectral_feature_version", "road_node_range", "syntax_node_range",
-            "region_node_range",
+            "spectral_feature_version", "lappe_version", "weighted_pe",
+            "weighted_spectrum_hash", "global_attention_scope", "road_node_range",
+            "syntax_node_range", "region_node_range",
         ):
             actual = identity[key]
             wanted = expected.get(key)
@@ -303,6 +320,9 @@ def validate_runtime_identities(
     checkpoint_fingerprints: set[str] = set()
     static_versions: set[str] = set()
     spectral_versions: set[str] = set()
+    lappe_versions: set[str] = set()
+    attention_scopes: set[str] = set()
+    weighted_spectrum_hashes: dict[str, str] = {}
     city_low: dict[str, dict[str, torch.Tensor]] = {}
     for snapshot in snapshots:
         metadata = dict(snapshot.graph_metadata or {})
@@ -312,8 +332,9 @@ def validate_runtime_identities(
         identity = high_identities[city]
         for key in (
             "joint_graph_hash", "checkpoint_fingerprint", "static_feature_version",
-            "spectral_feature_version", "road_node_range", "syntax_node_range",
-            "region_node_range",
+            "spectral_feature_version", "lappe_version", "weighted_pe",
+            "weighted_spectrum_hash", "global_attention_scope", "road_node_range",
+            "syntax_node_range", "region_node_range",
         ):
             expected = metadata.get(key)
             actual = identity.get(key)
@@ -328,6 +349,14 @@ def validate_runtime_identities(
         checkpoint_fingerprints.add(str(identity["checkpoint_fingerprint"]))
         static_versions.add(str(identity["static_feature_version"]))
         spectral_versions.add(str(identity["spectral_feature_version"]))
+        lappe_versions.add(str(identity["lappe_version"]))
+        attention_scopes.add(str(identity["global_attention_scope"]))
+        if identity.get("weighted_pe") is not True:
+            raise ValueError(f"严格模式: city={city} high feature 不是 weighted PE")
+        spectrum_hash = str(identity["weighted_spectrum_hash"])
+        previous_spectrum = weighted_spectrum_hashes.setdefault(city, spectrum_hash)
+        if previous_spectrum != spectrum_hash:
+            raise ValueError(f"严格模式: city={city} weighted spectrum hash 不稳定")
         if city not in city_low:
             city_low[city] = {
                 layer: snapshot.low_features[layer].detach().cpu()
@@ -348,13 +377,22 @@ def validate_runtime_identities(
         checkpoint_fingerprints.add(str(memory_identity.get("checkpoint_fingerprint", "")))
         static_versions.add(str(memory_identity.get("static_feature_version", "")))
         spectral_versions.add(str(memory_identity.get("spectral_feature_version", "")))
+        lappe_versions.add(str(memory_identity.get("lappe_version", "")))
+        attention_scopes.add(str(memory_identity.get("global_attention_scope", "")))
+        if memory_identity.get("weighted_pe") is not True:
+            raise ValueError(f"严格模式: city={city} RAG memory 不是 weighted PE")
+        memory_spectrum = str(memory_identity.get("weighted_spectrum_hash", ""))
+        previous_spectrum = weighted_spectrum_hashes.setdefault(city, memory_spectrum)
+        if previous_spectrum != memory_spectrum:
+            raise ValueError(f"严格模式: city={city} memory/high weighted spectrum hash 不一致")
         if city not in high_identities:
             continue
         high_identity = high_identities[city]
         for key in (
             "joint_graph_hash", "checkpoint_fingerprint", "static_feature_version",
-            "spectral_feature_version", "road_node_range", "syntax_node_range",
-            "region_node_range",
+            "spectral_feature_version", "lappe_version", "weighted_pe",
+            "weighted_spectrum_hash", "global_attention_scope", "road_node_range",
+            "syntax_node_range", "region_node_range",
         ):
             left, right = memory_identity.get(key), high_identity.get(key)
             if key.endswith("_range"):
@@ -365,10 +403,17 @@ def validate_runtime_identities(
         raise ValueError("严格模式: 三城 Stage-2 checkpoint fingerprint 不一致")
     if len(static_versions) != 1 or len(spectral_versions) != 1:
         raise ValueError("严格模式: 三城 feature version 不一致")
+    if lappe_versions != {STAGE2_LAPPE_VERSION}:
+        raise ValueError("严格模式: 三城 LapPE version 不一致或不是 weighted v3")
+    if len(attention_scopes) != 1:
+        raise ValueError("严格模式: 三城 global_attention_scope 不一致")
     return {
         "graphgps_checkpoint_fingerprint": next(iter(checkpoint_fingerprints)),
         "joint_graph_hashes": graph_hashes,
         "static_feature_version": next(iter(static_versions)),
         "spectral_feature_version": next(iter(spectral_versions)),
+        "lappe_version": next(iter(lappe_versions)),
+        "weighted_spectrum_hashes": weighted_spectrum_hashes,
+        "global_attention_scope": next(iter(attention_scopes)),
         "rag_memory_version": memory.version,
     }

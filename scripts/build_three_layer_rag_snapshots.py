@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from static_hierarchy.data import load_city_static_hierarchy  # noqa: E402
 from three_layer_rag import (  # noqa: E402
     ThreeLayerRAGInputs,
+    SNAPSHOT_BUNDLE_VERSION,
     build_hourly_three_layer_dynamics,
     load_stage2_low_features,
     normalize_hourly_dynamics,
@@ -202,7 +203,7 @@ def main() -> None:
     with normalizer_path.open("w", encoding="utf-8") as handle:
         json.dump(normalizer, handle, ensure_ascii=False, indent=2)
     torch.save({
-        "format_version": "three-layer-rag-snapshot-bundle-v1",
+        "format_version": SNAPSHOT_BUNDLE_VERSION,
         "snapshots": snapshots,
         "metadata": {
             "dynamic_feature_version": "three-layer-rag-dynamics-v1",

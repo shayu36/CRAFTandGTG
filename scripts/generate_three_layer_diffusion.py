@@ -20,6 +20,7 @@ from three_layer_diffusion import (  # noqa: E402
     DynamicNormalizer,
     ModelEMA,
     build_system,
+    file_sha256,
     load_diffusion_checkpoint,
     load_snapshot_bundle,
     load_stage2_high_features,
@@ -56,7 +57,8 @@ def main() -> None:
     snapshots, bundle_metadata = load_snapshot_bundle(
         _path(args.input), splits=data_cfg["generation_splits"]
     )
-    memory = ThreeLayerRAGMemory.load(_path(data_cfg["rag_memory"]))
+    memory_path = _path(data_cfg["rag_memory"])
+    memory = ThreeLayerRAGMemory.load(memory_path)
     configured_sources = tuple(sorted(str(city) for city in data_cfg["source_cities"]))
     if configured_sources != tuple(sorted(memory.source_cities)):
         raise ValueError("严格模式: config source_cities 与 RAG memory 不一致")
@@ -72,6 +74,7 @@ def main() -> None:
         )
         high[snapshot.city_id], high_identities[snapshot.city_id] = feature, identity
     identity = validate_runtime_identities(snapshots, high_identities, memory)
+    identity["rag_memory_sha256"] = file_sha256(memory_path)
     normalizer = DynamicNormalizer.load(_path(data_cfg["dynamic_normalizer"]))
     normalizer.validate_bundle_metadata(bundle_metadata)
     identity["dynamic_normalizer_fingerprint"] = normalizer.fingerprint

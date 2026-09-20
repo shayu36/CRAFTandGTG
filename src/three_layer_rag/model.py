@@ -174,6 +174,8 @@ class HierarchicalThreeLayerRAG(nn.Module):
         expected_graph_identity: Mapping[str, Any] | None = None,
         candidate_chunk_size: int = 4096,
         city_top_k: int | None = None,
+        train_source_keys: bool = True,
+        source_cache_device: str = "model",
     ):
         super().__init__()
         if low_dims is None:
@@ -245,15 +247,27 @@ class HierarchicalThreeLayerRAG(nn.Module):
             raise ValueError("RAG city_top_k 必须为正")
         self.candidate_chunk_size = int(candidate_chunk_size)
         self.city_top_k = int(city_top_k or self.top_k)
+        self.train_source_keys = bool(train_source_keys)
+        if source_cache_device not in {"model", "cpu"}:
+            raise ValueError("source_cache_device 必须为 model 或 cpu")
+        self.source_cache_device = str(source_cache_device)
         self.memory: ThreeLayerRAGMemory | None = None
-        self._eval_source_cache: dict[tuple[int, str, str, int | None], dict[str, list[_SourceEntry]]] = {}
+        self._eval_source_cache: dict[
+            tuple[int, str, str, int | None, tuple[int, ...]],
+            dict[str, list[_SourceEntry]],
+        ] = {}
+
+    def clear_source_cache(self) -> None:
+        """Invalidate eval-only source keys after parameters or memory change."""
+
+        self._eval_source_cache.clear()
 
     def train(self, mode: bool = True) -> "HierarchicalThreeLayerRAG":
         result = super().train(mode)
         if mode:
             # Key tensors are differentiable during training and must never be
             # reused after an optimizer step.
-            self._eval_source_cache.clear()
+            self.clear_source_cache()
         return result
 
     @property
@@ -267,7 +281,7 @@ class HierarchicalThreeLayerRAG(nn.Module):
     def set_memory(self, memory: ThreeLayerRAGMemory) -> "HierarchicalThreeLayerRAG":
         memory.validate(self.expected_graph_identity)
         self.memory = memory
-        self._eval_source_cache.clear()
+        self.clear_source_cache()
         return self
 
     @staticmethod
@@ -569,15 +583,32 @@ class HierarchicalThreeLayerRAG(nn.Module):
         return result
 
     def _source_entries(
-        self, memory: ThreeLayerRAGMemory, expected_length: int | None = None
+        self,
+        memory: ThreeLayerRAGMemory,
+        expected_length: int | None = None,
+        snapshot_indices: Sequence[int] | None = None,
     ) -> dict[str, list[_SourceEntry]]:
         device = next(self.parameters()).device
-        cache_key = (id(memory), str(device), str(next(self.parameters()).dtype), expected_length)
+        selected_indices = tuple(
+            range(len(memory.snapshots)) if snapshot_indices is None else snapshot_indices
+        )
+        if not selected_indices:
+            raise LookupError("严格模式: RAG 没有通过日历/LOCO 筛选的 source snapshot")
+        if min(selected_indices) < 0 or max(selected_indices) >= len(memory.snapshots):
+            raise IndexError("严格模式: RAG source snapshot index 越界")
+        cache_key = (
+            id(memory), str(device), str(next(self.parameters()).dtype),
+            expected_length, selected_indices,
+        )
         if not self.training and cache_key in self._eval_source_cache:
             return self._eval_source_cache[cache_key]
         entries = {layer: [] for layer in LAYER_NAMES}
+        cache_device = (
+            torch.device("cpu") if self.source_cache_device == "cpu" else device
+        )
         source_lengths: set[int] = set()
-        for snapshot in memory.snapshots:
+        for snapshot_index in selected_indices:
+            snapshot = memory.snapshots[snapshot_index]
             snapshot.validate(temporal_channels=self.temporal_channels)
             for layer in LAYER_NAMES:
                 if snapshot.low_features[layer].shape[1] != self.low_dims[layer]:
@@ -624,21 +655,32 @@ class HierarchicalThreeLayerRAG(nn.Module):
             for layer in LAYER_NAMES:
                 node_count = lows[layer].shape[1]
                 calendar_node = calendar_tensor[:, None].expand(1, node_count, -1)
-                # Source keys use the source parent temporal context.  Query
+                # Source keys use the source parent temporal context. Query
                 # branches replace this with the coarser retrieved reference.
                 branch_input = self._branch_input(
                     layer, lows, temporal_embeddings, calendar_node, contexts
                 )
-                key = F.normalize(self.key_projections[layer](branch_input[0]), dim=-1)
+                key = self.key_projections[layer](branch_input[0])
+                if self.metric == "cosine":
+                    key = F.normalize(key, dim=-1)
+                if not self.train_source_keys:
+                    # The complete source-train bank can contain millions of
+                    # node keys. Detaching this cache keeps Stage 4 within
+                    # 11 GB GPUs; query projections and diffusion remain
+                    # trainable. The default stays differentiable for tests
+                    # and higher-memory experiments.
+                    key = key.detach()
+                stored_key = key.to(cache_device)
+                stored_value = value_temporals[layer][0].detach().to(cache_device)
+                stored_temporal = temporal_embeddings[layer][0].detach().to(cache_device)
                 for node in range(node_count):
                     entries[layer].append(_SourceEntry(
                         city_id=snapshot.city_id,
                         calendar=dict(calendar),
-                        # Keep source keys attached to the current encoder
-                        # graph so key projections/temporal encoders train.
-                        key=key[node],
-                        value=value_temporals[layer][0, node].detach(),
-                        temporal_embedding=temporal_embeddings[layer][0, node].detach(),
+                        # Keys may be detached by the low-memory Stage-4 mode.
+                        key=stored_key[node],
+                        value=stored_value[node],
+                        temporal_embedding=stored_temporal[node],
                     ))
         if len(source_lengths) != 1:
             raise ValueError("严格模式: source memory 的三层动态序列长度不一致")
@@ -649,6 +691,47 @@ class HierarchicalThreeLayerRAG(nn.Module):
         if not self.training:
             self._eval_source_cache[cache_key] = entries
         return entries
+
+    @staticmethod
+    def _target_city_at(
+        target_city: str | Sequence[str] | None, index: int
+    ) -> str | None:
+        if isinstance(target_city, str):
+            return target_city
+        if target_city is None:
+            return None
+        if index >= len(target_city):
+            raise ValueError("严格模式: target_city batch 不足")
+        return str(target_city[index])
+
+    def _eligible_source_snapshot_indices(
+        self,
+        memory: ThreeLayerRAGMemory,
+        calendar: Mapping[str, Any],
+        batch_size: int,
+        target_city: str | Sequence[str] | None,
+    ) -> tuple[int, ...]:
+        """Apply calendar and LOCO filtering before any source tensor encoding."""
+
+        queries = [
+            (self._calendar_at(calendar, index), self._target_city_at(target_city, index))
+            for index in range(batch_size)
+        ]
+        selected = []
+        for snapshot_index, snapshot in enumerate(memory.snapshots):
+            source_calendar = {
+                name: int(torch.as_tensor(snapshot.calendar.get(name, 0)).reshape(-1)[0])
+                for name in ("month", "weekday", "start_hour", "holiday")
+            }
+            if any(
+                self._matches_calendar(source_calendar, target_calendar)
+                and (excluded_city is None or snapshot.city_id != excluded_city)
+                for target_calendar, excluded_city in queries
+            ):
+                selected.append(snapshot_index)
+        if not selected:
+            raise LookupError("严格模式: RAG 日历/LOCO 预筛选后无 source-train 候选")
+        return tuple(selected)
 
     def _matches_calendar(self, source: Mapping[str, int], target: Mapping[str, int]) -> bool:
         if int(source["weekday"]) != int(target["weekday"]):
@@ -670,14 +753,11 @@ class HierarchicalThreeLayerRAG(nn.Module):
         batch_size: int,
         target_city: str | Sequence[str] | None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        outputs, time_outputs, all_weights, all_indices, all_selected_city, all_city_names = [], [], [], [], [], []
+        outputs, time_outputs, all_weights, all_indices = [], [], [], []
+        all_selected_city, all_city_names, all_candidate_city_counts = [], [], []
         for batch_index in range(batch_size):
             target_calendar = self._calendar_at(calendar, batch_index)
-            excluded_city = None
-            if isinstance(target_city, str):
-                excluded_city = target_city
-            elif target_city is not None:
-                excluded_city = str(target_city[batch_index])
+            excluded_city = self._target_city_at(target_city, batch_index)
             candidates = [
                 entry for entry in entries
                 if self._matches_calendar(entry.calendar, target_calendar)
@@ -689,7 +769,9 @@ class HierarchicalThreeLayerRAG(nn.Module):
                     f"month={target_calendar['month']} weekday={target_calendar['weekday']} "
                     f"hour={target_calendar['start_hour']}"
                 )
-            query_row = F.normalize(query[batch_index], dim=-1)
+            query_row = query[batch_index]
+            if self.metric == "cosine":
+                query_row = F.normalize(query_row, dim=-1)
             by_city: dict[str, list[int]] = {}
             for position, entry in enumerate(candidates):
                 by_city.setdefault(entry.city_id, []).append(position)
@@ -702,7 +784,8 @@ class HierarchicalThreeLayerRAG(nn.Module):
                 for start in range(0, len(positions), self.candidate_chunk_size):
                     chunk_positions = positions[start:start + self.candidate_chunk_size]
                     keys = torch.stack([candidates[pos].key for pos in chunk_positions]).to(query.device, query.dtype)
-                    keys = F.normalize(keys, dim=-1)
+                    if self.metric == "cosine":
+                        keys = F.normalize(keys, dim=-1)
                     scores_chunk = (
                         query_row @ keys.transpose(0, 1)
                         if self.metric == "cosine"
@@ -744,6 +827,7 @@ class HierarchicalThreeLayerRAG(nn.Module):
             all_indices.append(selected)
             all_selected_city.append(selected_city)
             all_city_names.append(city_names)
+            all_candidate_city_counts.append([len(by_city[name]) for name in city_names])
         return (
             torch.stack(outputs),
             torch.stack(time_outputs),
@@ -752,10 +836,7 @@ class HierarchicalThreeLayerRAG(nn.Module):
                 "indices": torch.stack(all_indices),
                 "selected_city": torch.stack(all_selected_city),
                 "city_names": all_city_names,
-                "candidate_city_counts": [
-                    [sum(1 for entry in candidates if entry.city_id == name) for name in names]
-                    for names in all_city_names
-                ],
+                "candidate_city_counts": all_candidate_city_counts,
             },
         )
 
@@ -826,7 +907,14 @@ class HierarchicalThreeLayerRAG(nn.Module):
             raise RuntimeError("严格模式: RAG 尚未设置 source-train memory")
         active_memory.validate(self.expected_graph_identity)
         query_length = int(raw_temporals["region"].shape[3])
-        source_entries = self._source_entries(active_memory, expected_length=query_length)
+        source_snapshot_indices = self._eligible_source_snapshot_indices(
+            active_memory, calendar, batch_size, target_city
+        )
+        source_entries = self._source_entries(
+            active_memory,
+            expected_length=query_length,
+            snapshot_indices=source_snapshot_indices,
+        )
 
         retrieved_values: dict[str, torch.Tensor] = {}
         retrieved_times: dict[str, torch.Tensor] = {}
@@ -842,7 +930,9 @@ class HierarchicalThreeLayerRAG(nn.Module):
                 layer, lows, temporal_embeddings, calendar_nodes[layer], contexts, parent_refs
             )
             query_features[layer] = branch_input
-            query = F.normalize(self.query_projections[layer](branch_input), dim=-1)
+            query = self.query_projections[layer](branch_input)
+            if self.metric == "cosine":
+                query = F.normalize(query, dim=-1)
             query_keys[layer] = query
             values, times, info = self._retrieve_vectorized(
                 layer, query, source_entries[layer], calendar, batch_size, target_city
@@ -865,6 +955,7 @@ class HierarchicalThreeLayerRAG(nn.Module):
             "calendar_embedding": calendar_embedding,
             "source_cities": active_memory.source_cities,
             "city_id": city_from_input,
+            "num_encoded_source_snapshots": len(source_snapshot_indices),
         }
 
 

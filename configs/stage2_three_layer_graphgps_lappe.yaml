@@ -15,7 +15,7 @@ posenc:
   pe_dim: 16
   encoder: DeepSet
   cache: true
-  cache_dir: cache/graphgps_lappe_v2
+  cache_dir: cache/graphgps_lappe_v3_weighted
 
 frequency:
   enabled: true
@@ -24,7 +24,7 @@ frequency:
   joint_low_modes: 16
   orthogonality_tolerance: 0.001
   reconstruction_tolerance: 0.00001
-  output_version: three-layer-joint-graphgps-spectral-features-v2
+  output_version: three-layer-joint-graphgps-weighted-spectral-features-v3
   export_dir: outputs/stage2_three_layer_graphgps_lappe/spectral_features
 
 attention:

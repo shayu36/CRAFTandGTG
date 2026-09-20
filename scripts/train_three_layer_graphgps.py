@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import resource
 import sys
 import time
 
 import torch
+import torch.distributed as dist
 import yaml
 
 
@@ -32,6 +34,7 @@ from three_layer_graphgps.engine import (  # noqa: E402
     frequency_diagnostics,
     load_checkpoint,
     shape_summary,
+    stage2_graph_identities,
     train_and_evaluate,
 )
 from three_layer_graphgps.model import (  # noqa: E402
@@ -58,6 +61,24 @@ def _load_config(path: Path) -> dict:
 def _absolute(value: str | Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else ROOT / path
+
+
+def _init_distributed(action: str, requested_device: str) -> tuple[torch.device, int, int]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return torch.device(requested_device), 0, 1
+    if action not in {"train", "smoke"}:
+        raise ValueError("torchrun 多卡模式只支持 --action train 或 --action smoke")
+    if not torch.cuda.is_available():
+        raise RuntimeError("torchrun 多卡模式需要 CUDA")
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if local_rank >= torch.cuda.device_count():
+        raise RuntimeError(
+            f"LOCAL_RANK={local_rank} 超出可见 GPU 数量 {torch.cuda.device_count()}"
+        )
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    return torch.device(f"cuda:{local_rank}"), dist.get_rank(), world_size
 
 
 def _prepare(
@@ -132,7 +153,8 @@ def main() -> None:
     if not source_cities or any(not city for city in source_cities):
         raise ValueError("严格模式: source_cities 不能为空")
     target_city = args.target_city or data_cfg.get("target_city")
-    device = args.device or train_cfg.get("device", "cpu")
+    requested_device = args.device or train_cfg.get("device", "cpu")
+    device, rank, world_size = _init_distributed(args.action, requested_device)
     config["posenc"]["cache_dir"] = str(_absolute(config["posenc"]["cache_dir"]))
 
     if args.action in {"precompute", "validate"}:
@@ -168,7 +190,8 @@ def main() -> None:
                 )
                 if torch.equal(output["edge_index_joint_msg"].cpu(), output["edge_index_joint_pe"].cpu()):
                     raise RuntimeError("严格模式: 联合有向消息边不应被 LapPE 无向边替换")
-        print(json.dumps({"action": args.action, "cities": summaries}, indent=2, ensure_ascii=False))
+        if rank == 0:
+            print(json.dumps({"action": args.action, "cities": summaries}, indent=2, ensure_ascii=False))
         return
 
     if args.action == "export_features":
@@ -177,7 +200,14 @@ def main() -> None:
         export_cities = source_cities + ([target_city] if target_city else [])
         prepared = _prepare(config, export_cities, require_targets=False)
         model = ThreeLayerGraphGPSLapPE(config).to(device)
-        load_checkpoint(args.checkpoint, model=model, expected_config=config)
+        load_checkpoint(
+            args.checkpoint,
+            model=model,
+            expected_config=config,
+            expected_graph_identities=stage2_graph_identities(
+                prepared[: len(source_cities)]
+            ),
+        )
         fingerprint = checkpoint_fingerprint(args.checkpoint)
         frequency_cfg = config["frequency"]
         export_dir = _absolute(
@@ -197,6 +227,7 @@ def main() -> None:
                     data=data,
                     output=output,
                     checkpoint_sha256=fingerprint,
+                    global_attention_scope=model.global_attention_scope,
                 )
                 # Immediate strict round-trip validation catches graph/order mistakes.
                 load_spectral_features(
@@ -210,12 +241,13 @@ def main() -> None:
                     "shapes": shape_summary(data, output),
                     "frequency": frequency_diagnostics(data, output),
                 })
-        print(json.dumps({
-            "action": "export_features",
-            "checkpoint": str(args.checkpoint),
-            "checkpoint_fingerprint": fingerprint,
-            "cities": exported,
-        }, indent=2, ensure_ascii=False))
+        if rank == 0:
+            print(json.dumps({
+                "action": "export_features",
+                "checkpoint": str(args.checkpoint),
+                "checkpoint_fingerprint": fingerprint,
+                "cities": exported,
+            }, indent=2, ensure_ascii=False))
         return
 
     source_data = _prepare(config, source_cities, require_targets=True)
@@ -228,12 +260,18 @@ def main() -> None:
             device=device,
             epochs_override=1 if args.action == "smoke" else None,
         )
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        if rank == 0:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
         return
 
     checkpoint = args.checkpoint or output_dir / "best.pt"
     model = ThreeLayerGraphGPSLapPE(config).to(device)
-    load_checkpoint(checkpoint, model=model, expected_config=config)
+    load_checkpoint(
+        checkpoint,
+        model=model,
+        expected_config=config,
+        expected_graph_identities=stage2_graph_identities(source_data),
+    )
     result = {
         "checkpoint": str(checkpoint),
         "valid": evaluate_split(model, source_data, "valid"),

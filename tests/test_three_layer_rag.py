@@ -3,6 +3,7 @@ import pytest
 
 from three_layer_rag import (
     HierarchicalThreeLayerRAG,
+    STAGE2_LAPPE_VERSION,
     STAGE2_SPECTRAL_VERSION,
     ThreeLayerRAGInputs,
     ThreeLayerRAGMemory,
@@ -179,6 +180,10 @@ def test_memory_graph_identity_is_per_city_and_strict(tmp_path):
         "checkpoint_fingerprint": "checkpoint",
         "static_feature_version": "three-layer-start-road-v2",
         "spectral_feature_version": STAGE2_SPECTRAL_VERSION,
+        "lappe_version": STAGE2_LAPPE_VERSION,
+        "weighted_pe": True,
+        "weighted_spectrum_hash": "a" * 64,
+        "global_attention_scope": "joint",
         "road_node_range": (0, 4),
         "syntax_node_range": (4, 6),
         "region_node_range": (6, 7),
@@ -196,13 +201,17 @@ def test_memory_graph_identity_is_per_city_and_strict(tmp_path):
     assert loaded.graph_identity["chengdushi"]["joint_graph_hash"] == "other-hash"
 
 
-def test_stage2_low_feature_loader_rejects_old_version_and_reads_v2(tmp_path):
+def test_stage2_low_feature_loader_rejects_old_version_and_reads_weighted_v3(tmp_path):
     payload = {
         "format_version": STAGE2_SPECTRAL_VERSION,
         "city_id": "beijing",
         "checkpoint_fingerprint": "a" * 64,
         "joint_graph_hash": "hash",
         "static_feature_version": "three-layer-start-road-v2",
+        "lappe_version": STAGE2_LAPPE_VERSION,
+        "weighted_pe": True,
+        "weighted_spectrum_hash": "a" * 64,
+        "global_attention_scope": "joint",
         "road_node_range": (0, 4), "syntax_node_range": (4, 6), "region_node_range": (6, 7),
         "H_road_low": torch.zeros(4, 8),
         "H_syntax_low": torch.zeros(2, 8),
@@ -213,6 +222,95 @@ def test_stage2_low_feature_loader_rejects_old_version_and_reads_v2(tmp_path):
     low, identity = load_stage2_low_features(path, expected_city_id="beijing")
     assert low["road"].shape == (4, 8)
     assert identity["spectral_feature_version"] == STAGE2_SPECTRAL_VERSION
+    old_path = tmp_path / "old-v2.pt"
+    torch.save({**payload, "format_version": "three-layer-joint-graphgps-spectral-features-v2"}, old_path)
+    with pytest.raises(ValueError, match="旧无权谱特征"):
+        load_stage2_low_features(old_path)
+
+
+def test_rag_filters_calendar_and_loco_before_source_encoding():
+    model = _model()
+    eligible = _snapshot("beijing")
+    excluded = _snapshot("xianshi", offset=1.0)
+    wrong_calendar = _snapshot("chengdushi", offset=2.0)
+    wrong_calendar = ThreeLayerRAGInputs(**{
+        **wrong_calendar.__dict__,
+        "calendar": {"month": 12, "weekday": 4, "start_hour": 9, "holiday": 0},
+    })
+    memory = model.build_memory(
+        [eligible, excluded, wrong_calendar],
+        source_cities=["beijing", "xianshi", "chengdushi"],
+    )
+    output = model(_snapshot("xianshi", "test", offset=0.3), memory=memory)
+    assert output["num_encoded_source_snapshots"] == 1
+    assert output["retrieval"]["road"]["city_names"] == [["beijing"]]
+
+
+def test_chunked_retrieval_matches_large_chunk_result():
+    torch.manual_seed(41)
+    small = _model().eval()
+    large = _model().eval()
+    large.load_state_dict(small.state_dict())
+    small.candidate_chunk_size = 1
+    large.candidate_chunk_size = 10_000
+    snapshots = [_snapshot("beijing"), _snapshot("chengdushi", offset=1.0)]
+    memory = small.build_memory(
+        snapshots, source_cities=["beijing", "chengdushi"]
+    )
+    query = _snapshot("xianshi", "test", offset=0.2)
+    left = small(query, memory=memory)
+    right = large(query, memory=memory)
+    for layer in ("road", "syntax", "region"):
+        assert torch.allclose(left[f"R_{layer}"], right[f"R_{layer}"], atol=1e-6)
+        assert torch.allclose(
+            left["retrieval"][layer]["weights"],
+            right["retrieval"][layer]["weights"],
+            atol=1e-6,
+        )
+
+
+def test_candidate_city_diagnostics_are_kept_per_batch_row():
+    model = _model()
+    memory = model.build_memory(
+        [
+            _snapshot("beijing"),
+            _snapshot("chengdushi", offset=1.0),
+            _snapshot("xianshi", offset=2.0),
+        ],
+        source_cities=["beijing", "chengdushi", "xianshi"],
+    )
+    first = _snapshot("xianshi", "test", offset=0.2)
+    second = _snapshot("chengdushi", "test", offset=0.4)
+    low = {
+        layer: torch.stack([first.low_features[layer], second.low_features[layer]])
+        for layer in ("road", "syntax", "region")
+    }
+    temporal = {
+        layer: torch.stack([
+            first.temporal_features[layer], second.temporal_features[layer]
+        ])
+        for layer in ("road", "syntax", "region")
+    }
+    calendar = {
+        "month": torch.tensor([11, 11]),
+        "weekday": torch.tensor([1, 1]),
+        "start_hour": torch.tensor([8, 8]),
+        "holiday": torch.tensor([0, 0]),
+    }
+    output = model(
+        low,
+        temporal,
+        calendar,
+        memory=memory,
+        target_city=["xianshi", "chengdushi"],
+        parent_index=first.parent_index,
+    )
+    road_diagnostics = output["retrieval"]["road"]
+    assert road_diagnostics["city_names"] == [
+        ["beijing", "chengdushi"],
+        ["beijing", "xianshi"],
+    ]
+    assert road_diagnostics["candidate_city_counts"] == [[4, 4], [4, 4]]
 
 
 def test_joint_trainer_and_checkpoint_round_trip(tmp_path):

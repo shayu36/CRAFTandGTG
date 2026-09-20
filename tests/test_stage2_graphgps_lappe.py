@@ -12,6 +12,7 @@ import torch
 from static_hierarchy.contracts import CityStaticHierarchy
 from static_hierarchy.preprocessing import START_ROAD_FEATURE_ORDER
 from three_layer_graphgps.data import (
+    SPECTRAL_FEATURE_VERSION,
     build_joint_three_layer_graph,
     RELATION_TO_ID,
     GraphGPSCityData,
@@ -91,7 +92,7 @@ def _config(road_attention: str = "linear", full_max: int = 4096) -> dict:
             "joint_low_modes": 3,
             "orthogonality_tolerance": 0.001,
             "reconstruction_tolerance": 0.00001,
-            "output_version": "three-layer-joint-graphgps-spectral-features-v2",
+            "output_version": SPECTRAL_FEATURE_VERSION,
         },
         "attention": {
             "global_attn": road_attention,

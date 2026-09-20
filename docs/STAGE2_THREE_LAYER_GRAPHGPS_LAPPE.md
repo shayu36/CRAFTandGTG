@@ -126,8 +126,14 @@ concat(H_region_low, H_region_high)
 
 ## 7. 第三阶段输入契约
 
-导出版本升级为 `three-layer-joint-graphgps-spectral-features-v2`。旧 v1 只可作为
-历史格式识别，不能与 v2 混合训练或导出。
+当前导出版本为 `three-layer-joint-graphgps-weighted-spectral-features-v3`，LapPE
+版本为 `three-layer-joint-lappe-v3-weighted`。无向谱图使用联合消息边的真实权重，
+并把关系类型加入图身份；旧 v1/v2 及无权 LapPE 文件会被严格拒绝，不能混合训练或导出。
+
+Stage 2 checkpoint 版本为
+`three-layer-joint-graphgps-weighted-spectral-checkpoint-v4`。一个 checkpoint 对应多个
+source 城市，因此保存逐城市 `joint_graph_hash`、`weighted_spectrum_hash`、节点范围及
+整体 SHA-256，而不是使用一个错误的全局谱 hash。加载时会与当前训练城市静态图逐项核对。
 
 预期语义和消费方向为：
 
@@ -149,7 +155,7 @@ cost metric 固定为 cosine，多个 source 每城总质量为 `1/S`。它不�
 
 ## 8. 频率特征导出
 
-导出必须显式提供训练完成的 v2 checkpoint：
+导出必须显式提供当前 weighted-v4 checkpoint：
 
 ```bash
 python scripts/train_three_layer_graphgps.py \
@@ -160,8 +166,9 @@ python scripts/train_three_layer_graphgps.py \
 ```
 
 每个城市 `.pt` 保存联合 mixed/low/high、统一 eigenpairs、实际低频模式数、固定节点
-区间、Road 原始 ID、Syntax/Region 连续 ID、联合 graph hash、静态版本和 checkpoint
-SHA-256。加载时 city、节点顺序、联合边结构/hash、静态版本或 checkpoint 任一不匹配都会拒绝。
+区间、Road 原始 ID、Syntax/Region 连续 ID、联合 graph hash、weighted spectrum hash、
+无向 PE 边/权重/关系类型、attention scope、静态版本和 checkpoint SHA-256。加载时会
+重新从当前有向消息图构造加权无向谱图；任一审计张量、节点顺序、版本或 hash 不匹配都会拒绝。
 target 导出走 `require_targets=False`，不读取 target flow。大型导出文件不应提交 Git。
 
 ## 9. 训练与验证命令
@@ -190,17 +197,18 @@ Region 聚合 24 步 in/out 为 48 维标签。无观测 Region 不伪造零标�
 
 当前仓库已用 synthetic hierarchy 完成联合节点/偏移、五类关系边、单一 stack、
 LapPE 消息边分离、low/high 重构、梯度有限性和 full-attention fallback 测试。
-旧 v1 文档中的三城分层 GraphGPS 数值不代表当前 v2 语义；在重新生成联合三层
-cache 和 v2 checkpoint 前，不宣称真实三城联合结果。
+此前真实三城指标来自旧无权谱产物，不代表当前 weighted-v3 语义。必须重新生成 LapPE
+cache、重新训练 Stage 2、重新导出 weighted-v3 features，并继续重建 Stage 3 snapshots/
+memory 后，才能运行 Stage 4；当前不宣称已有 weighted-v3 三城指标。
 
 ## 11. 测试与环境限制
 
 ```text
 pytest -q tests/test_stage2_graphgps_lappe.py tests/test_stage2_frequency_decoupling.py
-→ 18 passed
+→ 21 passed（本轮定向测试；全套最终结果以实际测试输出为准）
 
 pytest -q --ignore=tests/test_dual_graph.py
-→ 145 passed
+→ 183 passed（本轮全仓回归，14 warnings）
 
 pytest -q
 → collection error: graph_tool requires GOMP_5.0, current libgomp ABI 不兼容

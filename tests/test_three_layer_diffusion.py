@@ -24,6 +24,7 @@ from three_layer_diffusion import (
     unflatten_nodes,
 )
 from three_layer_rag import HierarchicalThreeLayerRAG, ThreeLayerRAGInputs
+from three_layer_rag import STAGE2_LAPPE_VERSION, STAGE2_SPECTRAL_VERSION
 
 
 class TinyEstimator(nn.Module):
@@ -153,8 +154,12 @@ def _identity():
         "graphgps_checkpoint_fingerprint": "a" * 64,
         "joint_graph_hashes": {"source": "hash-a", "target": "hash-b"},
         "static_feature_version": "three-layer-start-road-v2",
-        "spectral_feature_version": "three-layer-joint-graphgps-spectral-features-v2",
-        "rag_memory_version": "three-layer-hierarchical-rag-v2",
+        "spectral_feature_version": STAGE2_SPECTRAL_VERSION,
+        "lappe_version": STAGE2_LAPPE_VERSION,
+        "weighted_spectrum_hashes": {"source": "c" * 64, "target": "d" * 64},
+        "global_attention_scope": "joint",
+        "rag_memory_version": "three-layer-hierarchical-rag-v3-weighted-stage2",
+        "rag_memory_sha256": "e" * 64,
         "dynamic_normalizer_fingerprint": "b" * 64,
     }
 
@@ -378,6 +383,19 @@ def test_ema_and_strict_checkpoint_round_trip(tmp_path):
     assert payload["epoch"] == 2 and payload["global_step"] == 7
     with pytest.raises(ValueError, match="identity"):
         load_diffusion_checkpoint(path, restored, expected_identity={"rag_memory_version": "wrong"})
+    with pytest.raises(ValueError, match="rag_memory_sha256"):
+        load_diffusion_checkpoint(
+            path, restored, expected_identity={"rag_memory_sha256": "f" * 64}
+        )
+
+
+def test_ema_parameter_update_invalidates_rag_source_cache():
+    system = ThreeLayerRAGDiffusionSystem(_rag(), _hierarchical())
+    ema = ModelEMA(system, decay=0.9, update_every=1)
+    ema.ema_model.rag._eval_source_cache[("stale",)] = {"road": []}
+    assert ema.ema_model.rag._eval_source_cache
+    ema.update(system)
+    assert not ema.ema_model.rag._eval_source_cache
 
 
 def test_log1p_zscore_inverse_is_not_craft_minus_one_to_one_mapping(tmp_path):
@@ -409,11 +427,15 @@ def test_log1p_zscore_inverse_is_not_craft_minus_one_to_one_mapping(tmp_path):
 def test_stage2_high_loader_binds_exact_low_node_order(tmp_path):
     low = {"road": torch.randn(4, 4), "syntax": torch.randn(2, 4), "region": torch.randn(1, 4)}
     payload = {
-        "format_version": "three-layer-joint-graphgps-spectral-features-v2",
+        "format_version": STAGE2_SPECTRAL_VERSION,
         "city_id": "toy",
         "joint_graph_hash": "hash",
         "checkpoint_fingerprint": "a" * 64,
         "static_feature_version": "three-layer-start-road-v2",
+        "lappe_version": STAGE2_LAPPE_VERSION,
+        "weighted_pe": True,
+        "weighted_spectrum_hash": "c" * 64,
+        "global_attention_scope": "joint",
         "road_node_range": (0, 4),
         "syntax_node_range": (4, 6),
         "region_node_range": (6, 7),

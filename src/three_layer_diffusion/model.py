@@ -65,6 +65,8 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
         temporal_dropout: float = 0.0,
         layer_loss_weights: Mapping[str, float] | None = None,
         parent_condition_dropout: float = 0.0,
+        node_chunk_size: int | None = None,
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
         calendar_dims = calendar_dims or {
@@ -80,6 +82,9 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
         self.cond_dim = int(cond_dim)
         self.layer_loss_weights = {key: float(value) for key, value in weights.items()}
         self.parent_condition_dropout = float(parent_condition_dropout)
+        if node_chunk_size is not None and int(node_chunk_size) <= 0:
+            raise ValueError("node_chunk_size 必须为正或为 null")
+        self.node_chunk_size = None if node_chunk_size is None else int(node_chunk_size)
 
         parent_channels = {"region": None, "syntax": 2, "road": 3}
         self.conditioners = nn.ModuleDict({
@@ -121,6 +126,7 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
                 use_self_cond=use_self_cond,
                 clip_x0=clip_x0,
                 self_condition_probability=self_condition_probability,
+                gradient_checkpointing=gradient_checkpointing,
             )
         self.diffusions = nn.ModuleDict(experts)
 
@@ -202,6 +208,95 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
         ) >= self.parent_condition_dropout
         return value * keep.to(value.dtype)
 
+    @staticmethod
+    def _slice_batch(value: torch.Tensor | None, start: int, end: int) -> torch.Tensor | None:
+        if value is None or value.ndim == 0:
+            return value
+        return value[start:end]
+
+    def _training_loss_chunked(
+        self,
+        diffusion: ConditionalGaussianDiffusion1D,
+        value: torch.Tensor,
+        condition: torch.Tensor,
+        *,
+        mask: torch.Tensor | None,
+        noise: torch.Tensor | None,
+        timesteps: torch.Tensor | None,
+        force_self_condition: bool | None,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Run node-wise diffusion chunks while preserving the full mean loss."""
+
+        chunk_size = self.node_chunk_size
+        total = int(value.shape[0])
+        if chunk_size is None or chunk_size >= total:
+            return diffusion.training_loss(
+                value,
+                condition,
+                mask=mask,
+                noise=noise,
+                timesteps=timesteps,
+                force_self_condition=force_self_condition,
+            )
+
+        slices = [(start, min(start + chunk_size, total)) for start in range(0, total, chunk_size)]
+        if mask is None:
+            weights = [float(end - start) / float(total) for start, end in slices]
+        else:
+            mask_total = torch.broadcast_to(mask, value.shape).sum().detach().item()
+            if mask_total > 0:
+                weights = [
+                    float(torch.broadcast_to(mask[start:end], value[start:end].shape).sum().detach())
+                    / mask_total
+                    for start, end in slices
+                ]
+            else:
+                weights = [0.0] * len(slices)
+
+        losses = []
+        for (start, end), weight in zip(slices, weights):
+            loss, _ = diffusion.training_loss(
+                value[start:end],
+                condition[start:end],
+                mask=self._slice_batch(mask, start, end),
+                noise=self._slice_batch(noise, start, end),
+                timesteps=self._slice_batch(timesteps, start, end),
+                force_self_condition=force_self_condition,
+            )
+            losses.append(loss * weight)
+        return torch.stack(losses).sum(), {
+            "chunk_count": len(slices),
+            "chunk_size": self.node_chunk_size,
+            "num_nodes": total,
+        }
+
+    def _sample_chunked(
+        self,
+        diffusion: ConditionalGaussianDiffusion1D,
+        condition: torch.Tensor,
+        *,
+        initial_noise: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Sample node chunks independently and concatenate them on the node axis."""
+
+        chunk_size = self.node_chunk_size
+        total = int(condition.shape[0])
+        if chunk_size is None or chunk_size >= total:
+            return diffusion.sample(condition, initial_noise=initial_noise)
+        outputs, info = [], None
+        for start in range(0, total, chunk_size):
+            end = min(start + chunk_size, total)
+            chunk, info = diffusion.sample(
+                condition[start:end],
+                initial_noise=None if initial_noise is None else initial_noise[start:end],
+            )
+            outputs.append(chunk)
+        assert info is not None
+        info = dict(info)
+        info["chunk_count"] = len(outputs)
+        info["chunk_size"] = self.node_chunk_size
+        return torch.cat(outputs, dim=0), info
+
     def training_loss(
         self,
         *,
@@ -230,7 +325,8 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
             "region", highs["region"], references["region"], calendar
         )
         region_flat, region_shape = flatten_nodes(targets["region"])
-        region_loss, region_details = self.region_diffusion.training_loss(
+        region_loss, region_details = self._training_loss_chunked(
+            self.region_diffusion,
             region_flat,
             region_condition,
             mask=None if masks is None else flatten_nodes(_ensure_batched(masks["region"], 3, "mask.region").to(device))[0],
@@ -249,7 +345,8 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
             "syntax", highs["syntax"], references["syntax"], calendar, syntax_parent
         )
         syntax_flat, syntax_shape = flatten_nodes(targets["syntax"])
-        syntax_loss, syntax_details = self.syntax_diffusion.training_loss(
+        syntax_loss, syntax_details = self._training_loss_chunked(
+            self.syntax_diffusion,
             syntax_flat,
             syntax_condition,
             mask=None if masks is None else flatten_nodes(_ensure_batched(masks["syntax"], 3, "mask.syntax").to(device))[0],
@@ -268,7 +365,8 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
             "road", highs["road"], references["road"], calendar, road_parent
         )
         road_flat, road_shape = flatten_nodes(targets["road"])
-        road_loss, road_details = self.road_diffusion.training_loss(
+        road_loss, road_details = self._training_loss_chunked(
+            self.road_diffusion,
             road_flat,
             road_condition,
             mask=None if masks is None else flatten_nodes(_ensure_batched(masks["road"], 3, "mask.road").to(device))[0],
@@ -315,8 +413,10 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
         region_noise = None
         if initial_noise is not None and "region" in initial_noise:
             region_noise = flatten_nodes(_ensure_batched(initial_noise["region"], 3, "initial_noise.region").to(region_condition.device))[0]
-        region_flat, sampling["region"] = self.region_diffusion.sample(
-            region_condition, initial_noise=region_noise
+        region_flat, sampling["region"] = self._sample_chunked(
+            self.region_diffusion,
+            region_condition,
+            initial_noise=region_noise,
         )
         generated["region"] = unflatten_nodes(region_flat, region_shape)
 
@@ -332,8 +432,10 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
         syntax_noise = None
         if initial_noise is not None and "syntax" in initial_noise:
             syntax_noise = flatten_nodes(_ensure_batched(initial_noise["syntax"], 3, "initial_noise.syntax").to(syntax_condition.device))[0]
-        syntax_flat, sampling["syntax"] = self.syntax_diffusion.sample(
-            syntax_condition, initial_noise=syntax_noise
+        syntax_flat, sampling["syntax"] = self._sample_chunked(
+            self.syntax_diffusion,
+            syntax_condition,
+            initial_noise=syntax_noise,
         )
         generated["syntax"] = unflatten_nodes(syntax_flat, syntax_shape)
 
@@ -349,8 +451,10 @@ class HierarchicalThreeLayerDiffusion(nn.Module):
         road_noise = None
         if initial_noise is not None and "road" in initial_noise:
             road_noise = flatten_nodes(_ensure_batched(initial_noise["road"], 3, "initial_noise.road").to(road_condition.device))[0]
-        road_flat, sampling["road"] = self.road_diffusion.sample(
-            road_condition, initial_noise=road_noise
+        road_flat, sampling["road"] = self._sample_chunked(
+            self.road_diffusion,
+            road_condition,
+            initial_noise=road_noise,
         )
         generated["road"] = unflatten_nodes(road_flat, road_shape)
         return {

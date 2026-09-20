@@ -18,12 +18,15 @@ from static_hierarchy.data import load_city_static_hierarchy
 
 from .spectral_lap_pe import (
     HierarchyLaplacianPE,
+    LAPPE_VERSION,
     pe_graph_hash,
     prepare_hierarchy_lappe,
+    to_undirected_edge_index_with_weight,
+    weighted_pe_graph_hash,
 )
 
 
-SPECTRAL_FEATURE_VERSION = "three-layer-joint-graphgps-spectral-features-v2"
+SPECTRAL_FEATURE_VERSION = "three-layer-joint-graphgps-weighted-spectral-features-v3"
 STATIC_FEATURE_VERSION = "three-layer-start-road-v2"
 
 
@@ -203,30 +206,48 @@ def build_joint_three_layer_graph(hierarchy: CityStaticHierarchy) -> JointThreeL
 
     validate_city_static_hierarchy(hierarchy)
     m, k, n = hierarchy.num_roads, hierarchy.num_syntax, hierarchy.num_regions
+    device = hierarchy.road_x.device
     # The graph builder does not concatenate raw 33/5/45-D features (that is
     # impossible without padding).  The model replaces this placeholder with
     # projected hidden features; zeros keep standalone graph validation finite.
-    x_placeholder = torch.zeros((m + k + n, 1), dtype=hierarchy.road_x.dtype)
+    x_placeholder = torch.zeros(
+        (m + k + n, 1), dtype=hierarchy.road_x.dtype, device=device
+    )
     node_type = torch.cat([
-        torch.zeros(m, dtype=torch.long),
-        torch.ones(k, dtype=torch.long),
-        torch.full((n,), 2, dtype=torch.long),
+        torch.zeros(m, dtype=torch.long, device=device),
+        torch.ones(k, dtype=torch.long, device=device),
+        torch.full((n,), 2, dtype=torch.long, device=device),
     ])
     edges, relations, weights = [], [], []
 
     def append(edge_index: torch.Tensor, relation: str, weight: torch.Tensor) -> None:
         edges.append(edge_index.long())
-        relations.append(torch.full((edge_index.shape[1],), RELATION_TO_ID[relation], dtype=torch.long))
+        relations.append(torch.full(
+            (edge_index.shape[1],),
+            RELATION_TO_ID[relation],
+            dtype=torch.long,
+            device=edge_index.device,
+        ))
         weight = weight.to(dtype=torch.float32).reshape(-1)
         if weight.shape != (edge_index.shape[1],):
             raise ValueError(f"严格模式: {relation} edge_weight 长度错误")
         weights.append(weight)
 
-    append(hierarchy.road_edge_index, "road_intra", torch.ones(hierarchy.road_edge_index.shape[1]))
+    append(
+        hierarchy.road_edge_index,
+        "road_intra",
+        torch.ones(hierarchy.road_edge_index.shape[1], device=device),
+    )
     append(hierarchy.syntax_edge_index + m, "syntax_intra", torch.as_tensor(
-        hierarchy.metadata.get("syntax_edge_weight", [1.0] * hierarchy.syntax_edge_index.shape[1]), dtype=torch.float32
+        hierarchy.metadata.get("syntax_edge_weight", [1.0] * hierarchy.syntax_edge_index.shape[1]),
+        dtype=torch.float32,
+        device=device,
     ))
-    append(hierarchy.region_edge_index + m + k, "region_intra", torch.ones(hierarchy.region_edge_index.shape[1]))
+    append(
+        hierarchy.region_edge_index + m + k,
+        "region_intra",
+        torch.ones(hierarchy.region_edge_index.shape[1], device=device),
+    )
     # Stage 1 COO is [syntax, road] and [region, syntax]; convert to message
     # direction source→destination while retaining the exact operator weights.
     rs = hierarchy.road_to_syntax_edge_index
@@ -505,8 +526,9 @@ def export_spectral_features(
     data: GraphGPSCityData,
     output: Mapping[str, torch.Tensor],
     checkpoint_sha256: str,
+    global_attention_scope: str,
 ) -> Path:
-    """Write v2 joint-GraphGPS features for later Stage 3 consumers."""
+    """Write weighted-v3 joint-GraphGPS features for later Stage 3 consumers."""
 
     hierarchy, posenc = data.hierarchy, data.posenc
     if not isinstance(checkpoint_sha256, str) or len(checkpoint_sha256) != 64:
@@ -535,6 +557,19 @@ def export_spectral_features(
     validate_joint_three_layer_graph(joint)
     if posenc.metadata.get("joint_graph_hash") != joint.joint_graph_hash:
         raise ValueError("严格模式: joint LapPE graph hash 与联合图不一致")
+    expected_spectrum_hash = weighted_pe_graph_hash(
+        joint.edge_index_joint, joint.num_nodes, joint.edge_weight, joint.edge_type
+    )
+    if posenc.metadata.get("pe_version") != LAPPE_VERSION:
+        raise ValueError("严格模式: LapPE version 不是当前 weighted v3")
+    if posenc.metadata.get("weighted_pe") is not True:
+        raise ValueError("严格模式: spectral export 必须使用 weighted LapPE")
+    if posenc.metadata.get("weighted_spectrum_hash") != expected_spectrum_hash:
+        raise ValueError("严格模式: weighted spectrum hash 与联合图不一致")
+    if posenc.joint.edge_weight_pe is None or posenc.joint.edge_type_pe is None:
+        raise ValueError("严格模式: weighted LapPE 缺少 PE edge weight/type audit tensors")
+    if global_attention_scope not in {"joint", "same_layer"}:
+        raise ValueError("严格模式: global_attention_scope 非法")
     if output["H_joint"].shape[0] != joint.num_nodes:
         raise ValueError("严格模式: H_joint 节点数与联合图不一致")
     if not torch.allclose(output["H_joint"], output["H_joint_low"] + output["H_joint_high"], atol=1e-5, rtol=1e-5):
@@ -563,6 +598,10 @@ def export_spectral_features(
         "city_id": hierarchy.city_id,
         "checkpoint_fingerprint": checkpoint_sha256,
         "static_feature_version": STATIC_FEATURE_VERSION,
+        "lappe_version": LAPPE_VERSION,
+        "weighted_pe": True,
+        "weighted_spectrum_hash": expected_spectrum_hash,
+        "global_attention_scope": global_attention_scope,
         "road_ids": road_ids,
         "syntax_ids": torch.arange(hierarchy.num_syntax, dtype=torch.long),
         "region_ids": torch.arange(hierarchy.num_regions, dtype=torch.long),
@@ -574,6 +613,9 @@ def export_spectral_features(
         "joint_edge_index": joint.edge_index_joint,
         "joint_edge_type": joint.edge_type,
         "joint_edge_weight": joint.edge_weight,
+        "joint_edge_index_pe": _cpu_tensor(posenc.joint.edge_index_pe, "joint_edge_index_pe"),
+        "joint_edge_weight_pe": _cpu_tensor(posenc.joint.edge_weight_pe, "joint_edge_weight_pe"),
+        "joint_edge_type_pe": posenc.joint.edge_type_pe.detach().cpu().contiguous(),
         # The spectrum is shared by every node; export one canonical row.
         "joint_eigvals": _cpu_tensor(posenc.joint.eigvals[:1], "joint_eigvals"),
         "joint_eigvecs": _cpu_tensor(posenc.joint.eigvecs, "joint_eigvecs"),
@@ -604,9 +646,13 @@ def load_spectral_features(
 
     payload = torch.load(Path(path), map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or payload.get("format_version") != SPECTRAL_FEATURE_VERSION:
-        raise ValueError("严格模式: 不是 three-layer-joint-graphgps-spectral-features-v2 文件；旧 v1 不得混合")
+        raise ValueError(f"严格模式: 不是 {SPECTRAL_FEATURE_VERSION} 文件；旧无权谱特征不得混合")
     if payload.get("static_feature_version") != STATIC_FEATURE_VERSION:
         raise ValueError("严格模式: spectral/static feature version 不匹配")
+    if payload.get("lappe_version") != LAPPE_VERSION or payload.get("weighted_pe") is not True:
+        raise ValueError("严格模式: spectral feature 不是当前 weighted LapPE 语义")
+    if payload.get("global_attention_scope") not in {"joint", "same_layer"}:
+        raise ValueError("严格模式: spectral feature 缺少 global_attention_scope")
     if payload.get("checkpoint_fingerprint") != expected_checkpoint_fingerprint:
         raise ValueError("严格模式: spectral feature checkpoint fingerprint 不匹配")
     if payload.get("city_id") != hierarchy.city_id:
@@ -625,6 +671,31 @@ def load_spectral_features(
     validate_joint_three_layer_graph(joint)
     if payload.get("joint_graph_hash") != joint.joint_graph_hash:
         raise ValueError("严格模式: joint_graph_hash 与当前联合图不匹配")
+    expected_spectrum_hash = weighted_pe_graph_hash(
+        joint.edge_index_joint, joint.num_nodes, joint.edge_weight, joint.edge_type
+    )
+    if payload.get("weighted_spectrum_hash") != expected_spectrum_hash:
+        raise ValueError("严格模式: weighted_spectrum_hash 与当前联合图不匹配")
+    expected_pe_edges, expected_pe_weights, expected_pe_types = (
+        to_undirected_edge_index_with_weight(
+            joint.edge_index_joint,
+            joint.num_nodes,
+            edge_weight=joint.edge_weight,
+            edge_type=joint.edge_type,
+        )
+    )
+    for key, expected in (
+        ("joint_edge_index_pe", expected_pe_edges),
+        ("joint_edge_weight_pe", expected_pe_weights),
+        ("joint_edge_type_pe", expected_pe_types),
+    ):
+        actual = payload.get(key)
+        if (
+            not isinstance(actual, torch.Tensor)
+            or expected is None
+            or not torch.equal(actual, expected)
+        ):
+            raise ValueError(f"严格模式: {key} 与当前加权无向 LapPE 图不匹配")
     if int(payload.get("num_joint_nodes", -1)) != joint.num_nodes:
         raise ValueError("严格模式: num_joint_nodes 与当前联合图不匹配")
     for key, expected in (("road_node_range", joint.road_node_range), ("syntax_node_range", joint.syntax_node_range), ("region_node_range", joint.region_node_range)):

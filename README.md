@@ -14,10 +14,10 @@ Region 组成统一三层异构层次图，使用单一 GraphGPS 编码器联合
 | 三层静态层级图 | 已完成 |
 | 单一联合 GraphGPS | 已完成 |
 | 联合 LapPE 与 low/high 分解 | 已完成 |
-| Beijing/Chengdushi/Xianshi Stage 2 训练与导出 | 已完成 |
-| Road/Syntax/Region 真实动态序列构建 | 已完成 |
-| Hierarchical RAG 数据契约、模型和 memory | 已完成 |
-| Train/val/test RAG snapshots | 已完成 |
+| Beijing/Chengdushi/Xianshi weighted-v3 Stage 2 训练与导出 | 代码已完成，必须重新训练/导出 |
+| Road/Syntax/Region 真实动态序列构建 | 代码已完成，weighted-v3 产物待重建 |
+| Hierarchical RAG 数据契约、模型和 memory | 代码已完成，weighted-v3 memory 待重建 |
+| Train/val/test RAG snapshots | 构建流程已完成，weighted-v3 bundle 待重建 |
 | RAG + Hierarchical Conditional Diffusion 代码与 CLI | 已完成（单元/synthetic smoke） |
 | Stage 4 真实三城训练与生成指标 | 尚未运行 |
 | 后续 GTG 轨迹解码闭环 | 尚未接入 |
@@ -111,20 +111,23 @@ history = [t-24,t)
 value   = [t,t+24)
 ```
 
-## 已生成的本地产物
+## 本地产物与版本迁移
 
-真实数据、cache、checkpoint 和大体积 tensor 不提交到 Git。当前本地运行已生成：
+真实数据、cache、checkpoint 和大体积 tensor 不提交到 Git。此前本地运行生成过：
 
 ```text
 outputs/stage2_three_layer_graphgps_lappe/best.pt
 outputs/stage2_three_layer_graphgps_lappe/spectral_features/
 outputs/stage3_three_layer_rag/train_snapshots.pt
 outputs/stage3_three_layer_rag/eval_snapshots.pt
-outputs/stage3_three_layer_rag/rag_memory_v2.pt
+outputs/stage3_three_layer_rag/rag_memory_v2.pt  # 历史旧产物
 ```
 
-对应的实际指标、节点数量、shape、fingerprint、文件大小和测试结果记录在
-[当前运行结果](docs/RUN_RESULTS.md)。
+这些结果使用旧无权 LapPE / spectral-features-v2 语义，仅作为历史运行记录，不能被
+当前 weighted-v3 代码继续训练或导出。当前契约会显式拒绝旧 checkpoint、旧 spectral
+feature、旧 snapshot 和旧 memory。必须按 Stage 2 重训与导出 → train/eval snapshots
+→ RAG memory 的顺序全部重建；不能只覆盖下游某一个文件。对应的历史指标、节点数量、
+shape 和 fingerprint 记录在 [当前运行结果](docs/RUN_RESULTS.md)。
 
 ## 主要运行入口
 
@@ -164,15 +167,19 @@ python scripts/build_three_layer_rag_snapshots.py \
   --splits train \
   --history-length 24 \
   --value-length 24 \
-  --snapshot-stride-hours 24
+  --snapshot-stride-hours 24 \
+  --overwrite
 ```
+
+随后使用新生成的 source-train normalizer 重建 `val/test` snapshots；完整命令见
+[Stage 3 文档](docs/STAGE3_THREE_LAYER_RAG.md)。
 
 ### RAG memory
 
 ```bash
 python scripts/build_rag_memory.py \
   --input outputs/stage3_three_layer_rag/train_snapshots.pt \
-  --output outputs/stage3_three_layer_rag/rag_memory_v2.pt \
+  --output outputs/stage3_three_layer_rag/rag_memory_v3.pt \
   --source-cities beijing chengdushi xianshi \
   --require-graph-identity
 ```

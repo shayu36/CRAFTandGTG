@@ -1,7 +1,7 @@
 # 当前代码状态
 
 > 状态日期：2026-09-19  
-> 本轮审计基线提交：`28119897e95cfa31a380555af73836250c98f681`（`first_over`）
+> 本轮改造基线提交：`1b7044e`（`first_over`）
 > 当前工作区包含尚未提交的 GraphGPS/LapPE/RAG/Stage 4 稳定性改造。
 
 ## 1. 总体架构
@@ -66,7 +66,7 @@ cache/static_hierarchy_start_v2/
 
 ## 3. Stage 2：统一三层 GraphGPS + LapPE
 
-状态：**已实现、已训练、已导出真实三城特征**。
+状态：**weighted-v3 代码和严格身份契约已实现；旧真实三城产物已失效，尚待重新训练与导出。**
 
 核心代码：
 
@@ -114,6 +114,7 @@ syntax_to_region
 
 - 消息传播使用原始有向联合图；
 - LapPE 单独使用联合图的无向化副本；
+- 无向谱图保留五类消息边的聚合权重与关系类型审计 identity；
 - 使用 sparse normalized Laplacian 与 `scipy.sparse.linalg.eigsh`；
 - 在联合 `H_joint` 上进行一次低频投影；
 - 再按稳定节点区间切分 Road/Syntax/Region 的 low/high 特征。
@@ -121,8 +122,15 @@ syntax_to_region
 当前 Stage 2 特征版本：
 
 ```text
-three-layer-joint-graphgps-spectral-features-v2
+three-layer-joint-graphgps-weighted-spectral-features-v3
 ```
+
+Stage 2 checkpoint 使用
+`three-layer-joint-graphgps-weighted-spectral-checkpoint-v4`，除配置语义外还保存每个
+训练城市的 `joint_graph_hash`、`weighted_spectrum_hash`、节点范围以及整个映射的
+SHA-256。特征文件同时保存并复核 `LAPPE_VERSION`、`weighted_pe`、
+`global_attention_scope` 和无向 PE 边/权重/关系类型；旧无权 checkpoint/v2 特征不能
+静默进入 Stage 3/4。
 
 ## 4. Stage 3：三层 Hierarchical RAG
 
@@ -181,6 +189,12 @@ Syntax 使用 Region 上下文；Road 使用 Syntax 和 Region 上下文。跨�
 - `log1p_zscore` 只在 source-train 时间范围拟合；
 - `valid` CLI 别名会规范化为 RAG 契约中的 `val`。
 
+训练检索会先在 CPU metadata 上按 query calendar 和 LOCO 目标城市筛选 memory
+snapshot，再对命中的 source snapshot 编码三层节点并建立可微 key 图。相似度检索继续
+按城市预选和 candidate chunk 分块，避免构造完整 `N_query × N_candidate` 矩阵；eval/
+generation source cache 只保存同一筛选子集。它仍需真实 GPU smoke 验证命中候选较多时
+的峰值显存。
+
 现有 `train_label.csv/valid_label.csv` 只有 `time_index=0..23` 的小时-of-day 汇总，
 没有日期。默认不会把它们广播成历史序列；只有显式启用
 `--label-fill-mode hour_of_day_prior` 才作为稀疏先验使用，并记录潜在泄漏风险。
@@ -230,8 +244,10 @@ future（teacher forcing）；推理时只读取上一级完整生成结果，�
 target snapshot 的 `value_temporal_features`。
 
 checkpoint 保存 RAG、三层 Diffusion、EMA、optimizer/scheduler、epoch/step、完整
-配置、随机种子，并绑定 GraphGPS fingerprint、三城 graph hash、feature version、
-RAG memory version 和 normalizer fingerprint。
+配置、随机种子，并绑定 GraphGPS fingerprint、三城 graph hash、weighted LapPE/
+spectrum identity、attention scope、feature version、RAG memory version、RAG memory
+文件 SHA-256 和 normalizer fingerprint。每次 EMA 参数更新后都会清除 EMA RAG 的
+eval source cache，验证不会复用上一 epoch 的过期 source keys。
 
 当前正确的完成度是：
 
@@ -242,8 +258,8 @@ RAG memory version 和 normalizer fingerprint。
 | 联合 LapPE 与 low/high 分解 | 已完成 |
 | 三层真实动态序列构建 | 已完成 |
 | Hierarchical RAG 输入契约与模型 | 已完成 |
-| source-train RAG memory | 已完成 |
-| val/test RAG snapshots | 已完成 |
+| source-train RAG memory | 构建代码已完成，weighted-v3 产物待重建 |
+| val/test RAG snapshots | 构建代码已完成，weighted-v3 产物待重建 |
 | RAG + 三层 Diffusion 正式训练入口 | 已实现，未真实训练 |
 | RAG → Region→Syntax→Road Diffusion | 已实现，synthetic smoke 通过 |
 | DDPM/DDIM、self-conditioning、EMA/checkpoint | 已实现，单元测试通过 |
@@ -258,7 +274,7 @@ RAG memory version 和 normalizer fingerprint。
 outputs/stage2_three_layer_graphgps_lappe/spectral_features/
 outputs/stage3_three_layer_rag/train_snapshots.pt
 outputs/stage3_three_layer_rag/eval_snapshots.pt
-outputs/stage3_three_layer_rag/rag_memory_v2.pt
+outputs/stage3_three_layer_rag/rag_memory_v3.pt
 ```
 
 联合训练已经按以下契约实现：
@@ -308,7 +324,14 @@ snapshot 的 GPU 性能烟雾测试。
 
 - LapPE v3 使用联合消息边权构造无向谱图，并将关系类型指纹纳入 cache identity；消息传播仍使用原始有向异构边。
 - LapPE eigenvector 采用最大幅值分量定号，降低重复计算的符号漂移。
+- Stage-2 checkpoint/feature、Stage-3 snapshot/memory 和 Stage-4 checkpoint 已形成 weighted-v3 版本拒绝链；旧产物必须全量重建。
+- RAG 在 source 编码前执行 calendar + LOCO snapshot 过滤，修复每步对整个 memory 建立可微计算图的问题。
+- EMA 更新会使 RAG source cache 失效；Stage-4 checkpoint 额外绑定 memory 文件 SHA-256。
 - GraphGPS 默认 `global_attention_scope: joint`，符合联合三层全局注意力要求；新增显式 `same_layer` 模式用于严格层内全局传播审计，不能静默改变默认语义。
 - Stage-4 验证固定 timestep/noise bank，避免随机单次验证损失影响 best checkpoint 和 scheduler。
 - Stage-4 checkpoint 保存/恢复 RNG、best metric 和 history；`normalization: none` 使用恒等统计量，`expm1` 反归一化增加有限范围保护。
 - Stage-4 factory 严格校验 RAG/Diffusion contract、序列长度、通道数和采样步数。
+
+本轮相关测试为 `57 passed, 4 warnings`；排除环境 ABI 阻断的
+`tests/test_dual_graph.py` 后，全仓回归为 `183 passed, 14 warnings`。直接运行
+`pytest -q` 仍在收集 `graph_tool` 时因当前环境缺少 `GOMP_5.0` 中止，这不是代码断言失败。

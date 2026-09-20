@@ -32,6 +32,7 @@ from .spectral_lap_pe import (
     LaplacianEigenpairs,
     compute_sparse_laplacian_eigenpairs,
     pe_graph_hash,
+    weighted_pe_graph_hash,
     prepare_hierarchy_lappe,
     to_undirected_edge_index,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "pool_road_to_syntax",
     "pool_syntax_to_region",
     "pe_graph_hash",
+    "weighted_pe_graph_hash",
     "prepare_city_data",
     "prepare_hierarchy_lappe",
     "to_undirected_edge_index",

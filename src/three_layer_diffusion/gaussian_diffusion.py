@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 def linear_beta_schedule(timesteps: int) -> torch.Tensor:
@@ -64,6 +65,7 @@ class ConditionalGaussianDiffusion1D(nn.Module):
         use_self_cond: bool = True,
         clip_x0: bool = False,
         self_condition_probability: float = 0.5,
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
         sampling_time_steps = time_steps if sampling_time_steps is None else sampling_time_steps
@@ -83,6 +85,7 @@ class ConditionalGaussianDiffusion1D(nn.Module):
         self.use_self_cond = bool(use_self_cond)
         self.clip_x0 = bool(clip_x0)
         self.self_condition_probability = float(self_condition_probability)
+        self.gradient_checkpointing = bool(gradient_checkpointing)
 
         if beta_schedule == "linear":
             betas = linear_beta_schedule(time_steps)
@@ -242,7 +245,25 @@ class ConditionalGaussianDiffusion1D(nn.Module):
                 self_condition = self.model_predictions(
                     noisy, timesteps, condition
                 ).pred_x0.detach()
-        predicted = self.estimator(noisy, timesteps, condition, self_condition)
+        if self.gradient_checkpointing and self.training:
+            def _checkpointed_estimator(
+                value: torch.Tensor,
+                step: torch.Tensor,
+                cond: torch.Tensor,
+                self_cond: torch.Tensor,
+            ) -> torch.Tensor:
+                return self.estimator(value, step, cond, self_cond)
+
+            predicted = checkpoint(
+                _checkpointed_estimator,
+                noisy,
+                timesteps,
+                condition,
+                torch.zeros_like(noisy) if self_condition is None else self_condition,
+                use_reentrant=False,
+            )
+        else:
+            predicted = self.estimator(noisy, timesteps, condition, self_condition)
         if predicted.shape != noise.shape or not torch.isfinite(predicted).all():
             raise ValueError("严格模式: epsilon estimator 输出非法")
         loss = self.masked_epsilon_loss(predicted, noise, mask)

@@ -185,7 +185,7 @@ Stage 4 使用：
 outputs/stage2_three_layer_graphgps_lappe/spectral_features/
 outputs/stage3_three_layer_rag/train_snapshots.pt
 outputs/stage3_three_layer_rag/eval_snapshots.pt
-outputs/stage3_three_layer_rag/rag_memory_v2.pt
+outputs/stage3_three_layer_rag/rag_memory_v3.pt
 outputs/stage3_three_layer_rag/train_snapshots.normalizer.json
 ```
 
@@ -201,6 +201,8 @@ bucket；trainer 在 bucket 内逐 snapshot 累积并平均 loss，不跨城市�
 - `static_feature_version` / `spectral_feature_version`；
 - 三层 node ranges 与 stable order；
 - RAG memory version/graph identity；
+- RAG memory 文件内容 SHA-256；
+- LapPE version、weighted spectrum hash 与 GraphGPS global attention scope；
 - dynamic normalizer SHA-256。
 
 ## 9. Checkpoint 与评估
@@ -218,6 +220,8 @@ GraphGPS fingerprint
 per-city joint graph hashes
 static/spectral feature versions
 RAG memory version
+RAG memory file SHA-256
+LapPE version / per-city weighted spectrum hashes / attention scope
 dynamic normalizer fingerprint
 Diffusion contract version
 ```
@@ -274,3 +278,7 @@ python scripts/generate_three_layer_diffusion.py \
 Stage-4 验证使用固定的 timestep/noise bank（不启用随机 self-conditioning），因此
 best checkpoint 和 scheduler 监控的是可重复的 normalized epsilon loss。恢复训练会
 恢复 optimizer、scheduler、EMA、RNG、best metric 与 history。
+
+EMA 每次完成参数/浮点 buffer 更新后都会调用 `ema_model.rag.clear_source_cache()`；因此
+下一次验证会用当前 EMA 的 temporal/key encoder 重新计算 eligible source keys，不会沿用
+上一 epoch 的缓存。

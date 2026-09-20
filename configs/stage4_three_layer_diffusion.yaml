@@ -9,14 +9,14 @@ data:
   spectral_feature_dir: outputs/stage2_three_layer_graphgps_lappe/spectral_features
   train_snapshots: outputs/stage3_three_layer_rag/train_snapshots.pt
   eval_snapshots: outputs/stage3_three_layer_rag/eval_snapshots.pt
-  rag_memory: outputs/stage3_three_layer_rag/rag_memory_v2.pt
+  rag_memory: outputs/stage3_three_layer_rag/rag_memory_v3.pt
   dynamic_normalizer: outputs/stage3_three_layer_rag/train_snapshots.normalizer.json
   train_splits: [train]
   validation_splits: [val]
   generation_splits: [val, test]
 
 rag:
-  contract_version: three-layer-hierarchical-rag-v2
+  contract_version: three-layer-hierarchical-rag-v3-weighted-stage2
   low_dim: 128
   seq_length: 24
   temporal_channels:
@@ -42,6 +42,10 @@ rag:
   # 分块检索避免 query×candidate 稠密矩阵；每个 source city 先保留相同数量候选。
   candidate_chunk_size: 4096
   city_top_k: 5
+  # The complete source-train node key graph exceeds 11 GB for Beijing.
+  # Query/RAG and Diffusion remain trainable; source keys use detached cache.
+  train_source_keys: false
+  source_cache_device: cpu
 
 diffusion:
   contract_version: three-layer-hierarchical-conditional-diffusion-v1
@@ -58,6 +62,10 @@ diffusion:
     region: 1.0
     syntax: 1.0
     road: 1.0
+  # Limit the flattened node batch to fit 11 GB GPUs; loss is accumulated
+  # over chunks and generation concatenates chunk outputs.
+  node_chunk_size: 64
+  gradient_checkpointing: true
   condition:
     high_dim: 128
     cond_dim: 256

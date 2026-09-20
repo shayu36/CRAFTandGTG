@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import copy
 
 import pytest
 import torch
@@ -18,6 +19,11 @@ from three_layer_graphgps.frequency import (
     build_low_frequency_transfer_inputs,
 )
 from three_layer_graphgps.model import ThreeLayerGraphGPSLapPE
+from three_layer_graphgps.engine import (
+    load_checkpoint,
+    save_checkpoint,
+    stage2_graph_identities,
+)
 from three_layer_graphgps.spectral_lap_pe import (
     LaplacianEigenpairs,
     compute_sparse_laplacian_eigenpairs,
@@ -185,6 +191,7 @@ def test_spectral_export_roundtrip_rejects_graph_and_checkpoint_mismatch(tmp_pat
         data=data,
         output=output,
         checkpoint_sha256=fingerprint,
+        global_attention_scope="joint",
     )
     loaded = load_spectral_features(
         path,
@@ -195,6 +202,22 @@ def test_spectral_export_roundtrip_rejects_graph_and_checkpoint_mismatch(tmp_pat
     assert loaded["H_road"].shape[0] == len(loaded["road_ids"])
     assert loaded["H_syntax"].shape[0] == len(loaded["syntax_ids"])
     assert loaded["H_region"].shape[0] == len(loaded["region_ids"])
+    assert loaded["lappe_version"] == "three-layer-joint-lappe-v3-weighted"
+    assert loaded["weighted_pe"] is True
+    assert len(loaded["weighted_spectrum_hash"]) == 64
+    assert loaded["global_attention_scope"] == "joint"
+
+    changed_pe = dict(loaded)
+    changed_pe["joint_edge_weight_pe"] = loaded["joint_edge_weight_pe"].clone()
+    changed_pe["joint_edge_weight_pe"][0] += 1.0
+    changed_pe_path = tmp_path / "changed-pe.pt"
+    torch.save(changed_pe, changed_pe_path)
+    with pytest.raises(ValueError, match="joint_edge_weight_pe"):
+        load_spectral_features(
+            changed_pe_path,
+            hierarchy=hierarchy,
+            expected_checkpoint_fingerprint=fingerprint,
+        )
 
     with pytest.raises(ValueError, match="checkpoint fingerprint"):
         load_spectral_features(
@@ -210,6 +233,54 @@ def test_spectral_export_roundtrip_rejects_graph_and_checkpoint_mismatch(tmp_pat
             path,
             hierarchy=changed,
             expected_checkpoint_fingerprint=fingerprint,
+        )
+    old = dict(loaded)
+    old["format_version"] = "three-layer-joint-graphgps-spectral-features-v2"
+    old_path = tmp_path / "old-v2.pt"
+    torch.save(old, old_path)
+    with pytest.raises(ValueError, match="旧无权谱特征"):
+        load_spectral_features(
+            old_path,
+            hierarchy=hierarchy,
+            expected_checkpoint_fingerprint=fingerprint,
+        )
+
+
+def test_stage2_checkpoint_binds_training_weighted_spectrum_identity(tmp_path):
+    hierarchy = _toy_hierarchy()
+    posenc = prepare_hierarchy_lappe(hierarchy, road_k=4, syntax_k=4, region_k=4)
+    data = GraphGPSCityData(hierarchy=hierarchy, posenc=posenc, targets=None)
+    identities = stage2_graph_identities([data])
+    model = ThreeLayerGraphGPSLapPE(_config())
+    path = tmp_path / "stage2.pt"
+    save_checkpoint(
+        path,
+        model=model,
+        optimizer=None,
+        config=_config(),
+        training_graph_identities=identities,
+        epoch=0,
+        best_valid_rmse=1.0,
+    )
+    loaded = load_checkpoint(
+        path,
+        model=ThreeLayerGraphGPSLapPE(_config()),
+        expected_config=_config(),
+        expected_graph_identities=identities,
+    )
+    assert loaded["training_graph_identities"] == identities
+    assert len(loaded["training_graph_identities_sha256"]) == 64
+
+    tampered = copy.deepcopy(loaded)
+    tampered["training_graph_identities"]["toy"]["weighted_spectrum_hash"] = "0" * 64
+    tampered_path = tmp_path / "tampered.pt"
+    torch.save(tampered, tampered_path)
+    with pytest.raises(ValueError, match="identity 摘要"):
+        load_checkpoint(
+            tampered_path,
+            model=ThreeLayerGraphGPSLapPE(_config()),
+            expected_config=_config(),
+            expected_graph_identities=identities,
         )
 
 

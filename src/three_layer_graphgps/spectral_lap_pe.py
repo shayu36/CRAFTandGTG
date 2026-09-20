@@ -208,6 +208,20 @@ def pe_graph_hash(edge_index: torch.Tensor, num_nodes: int) -> str:
     return _graph_hash(to_undirected_edge_index(edge_index, num_nodes), num_nodes)
 
 
+def weighted_pe_graph_hash(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    edge_weight: torch.Tensor,
+    edge_type: torch.Tensor,
+) -> str:
+    """Stable identity of the weighted, typed undirected LapPE graph."""
+
+    edge_index_pe, edge_weight_pe, edge_type_pe = to_undirected_edge_index_with_weight(
+        edge_index, num_nodes, edge_weight=edge_weight, edge_type=edge_type
+    )
+    return _graph_hash(edge_index_pe, num_nodes, edge_weight_pe, edge_type_pe)
+
+
 def _laplacian(
     edge_index_pe: torch.Tensor,
     num_nodes: int,
@@ -522,5 +536,7 @@ def prepare_hierarchy_lappe(
             "num_joint_nodes": graph.num_nodes,
             "hierarchy_version": graph_version,
             "pe_version": pe_version,
+            "weighted_pe": bool(joint.metadata.get("weighted_pe")),
+            "weighted_spectrum_hash": joint.metadata.get("graph_hash"),
         },
     )

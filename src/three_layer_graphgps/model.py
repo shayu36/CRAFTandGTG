@@ -11,11 +11,16 @@ import torch.nn.functional as F
 
 from static_hierarchy.contracts import CityStaticHierarchy, validate_city_static_hierarchy
 
-from .data import RELATION_NAMES, build_joint_three_layer_graph, validate_joint_three_layer_graph
+from .data import (
+    RELATION_NAMES,
+    SPECTRAL_FEATURE_VERSION,
+    build_joint_three_layer_graph,
+    validate_joint_three_layer_graph,
+)
 from .frequency import SpectralFeatureDecoupler
 from .pooling import pool_road_to_syntax, pool_syntax_to_region
 from .posenc import LapPEEncoder
-from .spectral_lap_pe import HierarchyLaplacianPE, prepare_hierarchy_lappe
+from .spectral_lap_pe import LAPPE_VERSION, HierarchyLaplacianPE, prepare_hierarchy_lappe
 
 
 class LinearGlobalAttention(nn.Module):
@@ -188,8 +193,8 @@ def validate_stage2_config(config: Mapping[str, Any]) -> None:
         raise ValueError("严格模式: frequency.method 仅支持 low_rank_spectral_projection")
     if frequency_cfg.get("decomposition_position", "after_graphgps") != "after_graphgps":
         raise ValueError("严格模式: frequency.decomposition_position 仅支持 after_graphgps")
-    if frequency_cfg.get("output_version", "three-layer-joint-graphgps-spectral-features-v2") != "three-layer-joint-graphgps-spectral-features-v2":
-        raise ValueError("严格模式: frequency.output_version 必须为 three-layer-joint-graphgps-spectral-features-v2")
+    if frequency_cfg.get("output_version", SPECTRAL_FEATURE_VERSION) != SPECTRAL_FEATURE_VERSION:
+        raise ValueError(f"严格模式: frequency.output_version 必须为 {SPECTRAL_FEATURE_VERSION}")
     joint_k, joint_low = int(pos_cfg.get("joint_num_eig", 16)), int(frequency_cfg.get("joint_low_modes", 16))
     if joint_k <= 0 or joint_low <= 0 or joint_low > joint_k:
         raise ValueError("严格模式: joint LapPE/low modes 配置非法")
@@ -274,6 +279,10 @@ class ThreeLayerGraphGPSLapPE(nn.Module):
         self._validate_pe_nodes(hierarchy, posenc)
         if posenc.joint.eigvecs.shape[1] != self.joint_k:
             raise ValueError("严格模式: joint LapPE k 与模型配置不一致")
+        if posenc.metadata.get("pe_version") != LAPPE_VERSION:
+            raise ValueError("严格模式: 模型拒绝旧 LapPE version")
+        if posenc.metadata.get("weighted_pe") is not True:
+            raise ValueError("严格模式: 模型只接受 weighted joint LapPE")
         device = next(self.parameters()).device
         hierarchy, posenc = hierarchy.to(device), posenc.to(device)
         graph = build_joint_three_layer_graph(hierarchy).to(device)

@@ -1,4 +1,8 @@
-# 当前运行结果
+# 当前运行结果（历史旧谱语义）
+
+> 本页记录的三城 Stage 2/3 产物生成于 weighted LapPE v3 契约之前，仅用于追溯。
+> 当前代码会拒绝这些旧 checkpoint、spectral-features-v2、snapshot 和 memory；它们不是
+> 当前 weighted-v3 路线的有效实验结果。重新训练与全链重建后应另行更新本页。
 
 > 结果日期：2026-09-19  
 > 数据范围：Beijing、Chengdushi、Xianshi 三个本地 GTG 城市数据集  

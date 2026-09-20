@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import random
 from pathlib import Path
 import sys
@@ -12,6 +14,7 @@ from typing import Any, Mapping
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import yaml
 from torch.utils.data import DataLoader
 
@@ -26,6 +29,7 @@ from three_layer_diffusion import (  # noqa: E402
     ThreeLayerDiffusionTrainer,
     build_system,
     collate_city_graph_bucket,
+    file_sha256,
     load_diffusion_checkpoint,
     load_snapshot_bundle,
     load_stage2_high_features,
@@ -46,6 +50,42 @@ def _device(name: str) -> torch.device:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError(f"请求了 {name}，但当前 PyTorch CUDA 不可用")
     return device
+
+
+def _init_distributed(name: str) -> tuple[torch.device, int, int, bool]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return _device(name), 0, 1, False
+    if not torch.cuda.is_available():
+        raise RuntimeError("多卡训练需要 CUDA")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl", init_method="env://")
+    return torch.device(f"cuda:{local_rank}"), dist.get_rank(), world_size, True
+
+
+class DistributedBatchSampler:
+    """将已经按城市分桶的 batch 分发到各 rank，并补齐 batch 数量。"""
+
+    def __init__(self, sampler: Any, rank: int, world_size: int):
+        self.sampler = sampler
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.sampler.set_epoch(epoch)
+
+    def __iter__(self):
+        batches = list(iter(self.sampler))
+        if not batches:
+            return
+        remainder = len(batches) % self.world_size
+        if remainder:
+            batches.extend([batches[-1]] * (self.world_size - remainder))
+        yield from batches[self.rank :: self.world_size]
+
+    def __len__(self) -> int:
+        return math.ceil(len(self.sampler) / self.world_size)
 
 
 def _seed_all(seed: int) -> None:
@@ -188,7 +228,8 @@ def main() -> None:
     config = yaml.safe_load(_path(args.config).read_text(encoding="utf-8"))
     seed = int(config.get("seed", 2026))
     _seed_all(seed)
-    device = _device(args.device)
+    device, rank, world_size, distributed = _init_distributed(args.device)
+    is_main = rank == 0
     data_cfg, training_cfg = config["data"], config["training"]
     train, train_metadata = load_snapshot_bundle(
         _path(data_cfg["train_snapshots"]), splits=data_cfg["train_splits"]
@@ -200,7 +241,8 @@ def main() -> None:
         train = train[:args.max_train_snapshots]
     if args.max_validation_snapshots is not None:
         validation = validation[:args.max_validation_snapshots]
-    memory = ThreeLayerRAGMemory.load(_path(data_cfg["rag_memory"]))
+    memory_path = _path(data_cfg["rag_memory"])
+    memory = ThreeLayerRAGMemory.load(memory_path)
     configured_sources = tuple(sorted(str(city) for city in data_cfg["source_cities"]))
     if configured_sources != tuple(sorted(memory.source_cities)):
         raise ValueError("严格模式: config source_cities 与 RAG memory 不一致")
@@ -209,6 +251,7 @@ def main() -> None:
         all_snapshots, _path(data_cfg["spectral_feature_dir"])
     )
     identity = validate_runtime_identities(all_snapshots, high_identities, memory)
+    identity["rag_memory_sha256"] = file_sha256(memory_path)
     normalizer = DynamicNormalizer.load(_path(data_cfg["dynamic_normalizer"]))
     normalizer.validate_bundle_metadata(train_metadata)
     normalizer.validate_bundle_metadata(validation_metadata)
@@ -259,11 +302,16 @@ def main() -> None:
         history = list(payload.get("history", []))
 
     dataset = SnapshotDataset(train)
-    batch_sampler = CityGraphBucketBatchSampler(
+    base_batch_sampler = CityGraphBucketBatchSampler(
         train,
         batch_size=int(training_cfg.get("city_bucket_size", 1)),
         shuffle=True,
         seed=seed,
+    )
+    batch_sampler = (
+        DistributedBatchSampler(base_batch_sampler, rank, world_size)
+        if distributed
+        else base_batch_sampler
     )
     loader = DataLoader(
         dataset, batch_sampler=batch_sampler, collate_fn=collate_city_graph_bucket
@@ -283,10 +331,25 @@ def main() -> None:
         train_metrics = []
         for batch in loader:
             train_metrics.append(trainer.train_batch(batch))
-        validation_metrics = _evaluate_noise(
-            ema.ema_model, validation, high, memory, validation_bank
+        if distributed:
+            dist.barrier()
+        validation_metrics = (
+            _evaluate_noise(ema.ema_model, validation, high, memory, validation_bank)
+            if is_main
+            else None
         )
-        scheduler.step(validation_metrics["normalized_noise_loss"])
+        validation_metric = torch.tensor(
+            float(validation_metrics["normalized_noise_loss"] if is_main else 0.0),
+            device=device,
+        )
+        if distributed:
+            dist.broadcast(validation_metric, src=0)
+        scheduler.step(float(validation_metric.item()))
+        if not is_main:
+            if distributed:
+                dist.barrier()
+            continue
+        assert validation_metrics is not None
         record: dict[str, Any] = {
             "epoch": epoch,
             "train_loss": sum(item["loss"] for item in train_metrics) / len(train_metrics),
@@ -342,6 +405,11 @@ def main() -> None:
         (output_dir / "history.json").write_text(
             json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        if distributed:
+            dist.barrier()
+
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

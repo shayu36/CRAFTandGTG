@@ -73,7 +73,7 @@ memory 必须由 source cities 的 `train` snapshot 构建：
 ```bash
 python scripts/build_rag_memory.py \
   --input /local/path/three_layer_train_snapshots.pt \
-  --output outputs/stage3_three_layer_rag/rag_memory_v2.pt \
+  --output outputs/stage3_three_layer_rag/rag_memory_v3.pt \
   --source-cities beijing chengdushi xianshi \
   --require-graph-identity
 ```
@@ -88,7 +88,7 @@ python scripts/build_rag_memory.py \
 `hourly_boundary_flow_raw.csv` 的 `in_flow/out_flow`。因此该过程不会
 把 Region 流量伪装成 Road 或 Syntax 动态数据。
 
-先导出 Stage 2 v2 低频特征，随后构建 source-train bundle：
+先导出 Stage 2 weighted-v3 低频特征，随后构建 source-train bundle：
 
 ```bash
 python scripts/build_three_layer_rag_snapshots.py \
@@ -102,13 +102,34 @@ python scripts/build_three_layer_rag_snapshots.py \
   --splits train \
   --history-length 24 \
   --value-length 24 \
-  --snapshot-stride-hours 24
+  --snapshot-stride-hours 24 \
+  --overwrite
 
 python scripts/build_rag_memory.py \
   --input outputs/stage3_three_layer_rag/train_snapshots.pt \
-  --output outputs/stage3_three_layer_rag/rag_memory_v2.pt \
+  --output outputs/stage3_three_layer_rag/rag_memory_v3.pt \
   --source-cities beijing chengdushi xianshi \
   --require-graph-identity
+```
+
+再使用刚生成的 source-train normalizer 重建评估 bundle：
+
+```bash
+python scripts/build_three_layer_rag_snapshots.py \
+  --cities beijing chengdushi xianshi \
+  --hierarchy-cache-dir cache/static_hierarchy_start_v2 \
+  --spectral-feature-dir outputs/stage2_three_layer_graphgps_lappe/spectral_features \
+  --gtg-data-root data \
+  --region-flow-root data/gtg_craft \
+  --region-flow-file-name hourly_boundary_flow_raw.csv \
+  --normalizer-in outputs/stage3_three_layer_rag/train_snapshots.normalizer.json \
+  --normalizer-out outputs/stage3_three_layer_rag/eval_snapshots.normalizer.json \
+  --output outputs/stage3_three_layer_rag/eval_snapshots.pt \
+  --splits valid test \
+  --history-length 24 \
+  --value-length 24 \
+  --snapshot-stride-hours 24 \
+  --overwrite
 ```
 
 每个 snapshot 的 Query/Key 历史窗口为 `[t-24,t)`，被检索 Value 为独立的
@@ -137,7 +158,7 @@ hour-of-day 汇总，并非带日期的 720 小时观测，不能单独重建动
 
 真实 CSV、`cache/`、谱特征、memory 和 checkpoint 不提交到 Git。输入 bundle
 的格式是 `ThreeLayerRAGInputs` 字段；它可以由本地 Stage 2 输出、道路动态
-聚合和 Region flow loader 共同构成。Stage 2 v2 文件可以通过
+聚合和 Region flow loader 共同构成。Stage 2 weighted-v3 文件可以通过
 `load_stage2_low_features()` 读取；`build_rag_inputs_from_local_artifacts()`
 会同时接入静态 hierarchy 的两个稀疏加权算子。
 
@@ -160,7 +181,7 @@ python scripts/build_three_layer_rag_input.py \
 ```bash
 python scripts/query_three_layer_rag.py \
   --config configs/stage3_three_layer_rag.yaml \
-  --memory outputs/stage3_three_layer_rag/rag_memory_v2.pt \
+  --memory outputs/stage3_three_layer_rag/rag_memory_v3.pt \
   --query /local/path/target_query.pt \
   --output outputs/stage3_three_layer_rag/target_reference.pt
 ```
@@ -172,11 +193,25 @@ joint_graph_hash
 checkpoint_fingerprint
 static_feature_version
 spectral_feature_version
+lappe_version / weighted_pe / weighted_spectrum_hash
+global_attention_scope
 road/syntax/region node range
 ```
 
 不同城市允许拥有不同 graph hash，但同一城市的 snapshots 不能混用不同
 GraphGPS checkpoint 或节点顺序。
+
+## 真实规模检索策略
+
+每个 query batch 先只读取 CPU metadata，按 calendar 和 target city 的 LOCO 规则筛选
+eligible source snapshots；被排除城市和不匹配日历的 snapshot 不会进入 temporal encoder，
+也不会创建梯度图。随后仅对 eligible snapshots 的三层节点编码，按 source city 做预选，
+再用 `candidate_chunk_size` 分块求 Top-K。eval/generation cache 的 key 包含筛选后的 snapshot
+索引，模型切回 train、替换 memory 或 EMA 参数更新时会清空 cache。
+
+当前城市预选能抑制节点数量偏置，但最终全局 Top-K 仍可能全部来自同一城市；若实验要求
+严格的逐城市等质量，需要另行启用/实现最终城市 quota。真实三城 Stage-4 GPU smoke 仍是
+确认峰值显存的必要验收步骤。
 
 当前三城本地数据已经具备：带 `start_time` 的道路序列 `rid_list`、逐道路
 `dur_list`，以及 `train_label/valid_label` 的 `time_index/rid/dur_mean/speed_mean`。

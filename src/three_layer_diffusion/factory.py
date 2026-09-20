@@ -57,6 +57,8 @@ def build_rag_model(config: Mapping[str, Any]) -> HierarchicalThreeLayerRAG:
         expected_graph_identity=None,
         candidate_chunk_size=int(rag.get("candidate_chunk_size", 4096)),
         city_top_k=None if rag.get("city_top_k") is None else int(rag["city_top_k"]),
+        train_source_keys=bool(rag.get("train_source_keys", True)),
+        source_cache_device=str(rag.get("source_cache_device", "model")),
     )
 
 
@@ -89,6 +91,11 @@ def build_diffusion_model(config: Mapping[str, Any]) -> HierarchicalThreeLayerDi
         temporal_dropout=float(condition.get("temporal_dropout", 0.0)),
         layer_loss_weights=diffusion["layer_loss_weights"],
         parent_condition_dropout=float(condition.get("parent_condition_dropout", 0.0)),
+        node_chunk_size=(
+            None if diffusion.get("node_chunk_size") is None
+            else int(diffusion["node_chunk_size"])
+        ),
+        gradient_checkpointing=bool(diffusion.get("gradient_checkpointing", False)),
     )
 
 

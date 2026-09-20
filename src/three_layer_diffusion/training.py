@@ -9,12 +9,13 @@ from typing import Any, Mapping
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import nn
 
 from .model import DIFFUSION_CONTRACT_VERSION, ThreeLayerRAGDiffusionSystem
 
 
-DIFFUSION_CHECKPOINT_VERSION = "three-layer-rag-diffusion-checkpoint-v2"
+DIFFUSION_CHECKPOINT_VERSION = "three-layer-rag-diffusion-checkpoint-v3-weighted-stage2"
 
 
 class ModelEMA(nn.Module):
@@ -42,6 +43,10 @@ class ModelEMA(nn.Module):
         for name, ema_buffer in self.ema_model.named_buffers():
             if name in model_buffers:
                 ema_buffer.copy_(model_buffers[name].detach())
+        rag = getattr(self.ema_model, "rag", None)
+        clear_cache = getattr(rag, "clear_source_cache", None)
+        if callable(clear_cache):
+            clear_cache()
 
 
 class ThreeLayerDiffusionTrainer:
@@ -87,6 +92,15 @@ class ThreeLayerDiffusionTrainer:
         if not torch.isfinite(loss):
             raise FloatingPointError("严格模式: joint RAG+Diffusion loss 含 NaN/Inf")
         loss.backward()
+        if dist.is_available() and dist.is_initialized():
+            world_size = dist.get_world_size()
+            for parameter in self.system.parameters():
+                gradient = parameter.grad
+                if gradient is None:
+                    gradient = torch.zeros_like(parameter)
+                dist.all_reduce(gradient, op=dist.ReduceOp.SUM)
+                gradient.div_(world_size)
+                parameter.grad = gradient
         gradients = [
             parameter.grad for parameter in self.system.parameters()
             if parameter.requires_grad and parameter.grad is not None
@@ -113,7 +127,11 @@ def _require_checkpoint_identity(identity: Mapping[str, Any]) -> None:
         "joint_graph_hashes",
         "static_feature_version",
         "spectral_feature_version",
+        "lappe_version",
+        "weighted_spectrum_hashes",
+        "global_attention_scope",
         "rag_memory_version",
+        "rag_memory_sha256",
         "dynamic_normalizer_fingerprint",
     }
     missing = sorted(required - set(identity))
