@@ -1,0 +1,73 @@
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+{"epoch": 1, "train_loss": 32.668229648045134, "validation_normalized_noise_loss": 3.5949394702911377, "validation_region_normalized_noise_loss": 1.2920117378234863, "validation_syntax_normalized_noise_loss": 1.105360746383667, "validation_road_normalized_noise_loss": 1.1975669860839844, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015561194331558}
+{"epoch": 2, "train_loss": 25.09478419167655, "validation_normalized_noise_loss": 3.5934436321258545, "validation_region_normalized_noise_loss": 1.2910438776016235, "validation_syntax_normalized_noise_loss": 1.105194330215454, "validation_road_normalized_noise_loss": 1.1972053050994873, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015560532057727}
+{"epoch": 3, "train_loss": 26.8566997391837, "validation_normalized_noise_loss": 3.588599681854248, "validation_region_normalized_noise_loss": 1.2879257202148438, "validation_syntax_normalized_noise_loss": 1.1046308279037476, "validation_road_normalized_noise_loss": 1.1960433721542358, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015558986752122}
+{"epoch": 4, "train_loss": 26.195184775761195, "validation_normalized_noise_loss": 3.5853512287139893, "validation_region_normalized_noise_loss": 1.2858493328094482, "validation_syntax_normalized_noise_loss": 1.1042306423187256, "validation_road_normalized_noise_loss": 1.195271611213684, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015558269288805}
+{"epoch": 5, "train_loss": 23.386223452431814, "validation_normalized_noise_loss": 3.5774519443511963, "validation_region_normalized_noise_loss": 1.280853271484375, "validation_syntax_normalized_noise_loss": 1.1031969785690308, "validation_road_normalized_noise_loss": 1.19340181350708, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015556613604227}
+{"epoch": 6, "train_loss": 19.285656656537736, "validation_normalized_noise_loss": 3.572906494140625, "validation_region_normalized_noise_loss": 1.2780181169509888, "validation_syntax_normalized_noise_loss": 1.1025644540786743, "validation_road_normalized_noise_loss": 1.192324161529541, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015555951330397}
+{"epoch": 7, "train_loss": 20.354651723589217, "validation_normalized_noise_loss": 3.5680339336395264, "validation_region_normalized_noise_loss": 1.2750054597854614, "validation_syntax_normalized_noise_loss": 1.1018611192703247, "validation_road_normalized_noise_loss": 1.191166877746582, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015556337656798}
+{"epoch": 8, "train_loss": 18.087135451180593, "validation_normalized_noise_loss": 3.5574257373809814, "validation_region_normalized_noise_loss": 1.2685190439224243, "validation_syntax_normalized_noise_loss": 1.1002670526504517, "validation_road_normalized_noise_loss": 1.1886396408081055, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.2001555578576194}
+Traceback (most recent call last):
+  File "/root/autodl-tmp/projects/Paper/scripts/train_three_layer_diffusion.py", line 416, in <module>
+    main()
+  File "/root/autodl-tmp/projects/Paper/scripts/train_three_layer_diffusion.py", line 363, in main
+    record["physical_generation"] = _evaluate_generation(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/scripts/train_three_layer_diffusion.py", line 188, in _evaluate_generation
+    output = system.generate(snapshot, high_features=high[snapshot.city_id], memory=memory)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/model.py", line 537, in generate
+    result = self.diffusion.generate(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/model.py", line 416, in generate
+    region_flat, sampling["region"] = self._sample_chunked(
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/model.py", line 289, in _sample_chunked
+    chunk, info = diffusion.sample(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/gaussian_diffusion.py", line 350, in sample
+    result = self._ddpm_sample(condition, initial_noise)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/gaussian_diffusion.py", line 287, in _ddpm_sample
+    prediction = self.model_predictions(
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/gaussian_diffusion.py", line 180, in model_predictions
+    raise ValueError("严格模式: epsilon estimator 输出非法")
+ValueError: 严格模式: epsilon estimator 输出非法
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 171650 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 171651 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 171652 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 171653 closing signal SIGTERM
+ERROR:torch.distributed.elastic.multiprocessing.api:failed (exitcode: 1) local_rank: 0 (pid: 171649) of binary: /root/miniconda3/bin/python
+Traceback (most recent call last):
+  File "/root/miniconda3/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/run.py", line 794, in main
+    run(args)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/run.py", line 785, in run
+    elastic_launch(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 250, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+scripts/train_three_layer_diffusion.py FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-09-20_14:52:44
+  host      : autodl-container-afbc499dfb-7b31d3d2
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 171649)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================

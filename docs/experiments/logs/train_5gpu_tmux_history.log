@@ -1,0 +1,276 @@
++-----------------------------------------------AutoDL-----------------------------------------------------+
+目录说明:
+╔═════════════════╦════════╦════╦═════════════════════════════════════════════════════════════════════════╗
+║目录             ║名称    ║速度║说明                                                                     ║
+╠═════════════════╬════════╬════╬═════════════════════════════════════════════════════════════════════════╣
+║/                ║系 统 盘║一般║实例关机数据不会丢失，可存放代码等。会随保存镜像一起保存。               ║
+║/root/autodl-tmp ║数 据 盘║ 快 ║实例关机数据不会丢失，可存放读写IO要求高的数据。但不会随保存镜像一起保存 ║
+╚═════════════════╩════════╩════╩═════════════════════════════════════════════════════════════════════════╝
+CPU ：40 核心
+内存：160 GB
+GPU ：NVIDIA GeForce RTX 2080 Ti, 5
+存储：
+  系 统 盘/               ：22% 210G/1006G
+  数 据 盘/root/autodl-tmp：22% 210G/1006G
++----------------------------------------------------------------------------------------------------------+
+*注意:
+1.系统盘较小请将大的数据存放于数据盘或文件存储中，重置系统时数据盘和文件存储中的数据不受影响
+2.清理系统盘请参考：https://www.autodl.com/docs/qa1/
+3.终端中长期执行命令请使用screen等工具开后台运行，确保程序不受SSH连接中断影响：https://www.autodl.com/docs/daemon/
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# cd /root/autodl-tmp/projects/Paper && \
+torchrun --standalone --nproc_per_node=5 \
+  scripts/train_three_layer_diffusion.py \
+  --config configs/stage4_three_layer_diffusion.yaml \
+  --device cuda:0 \
+  --resume outputs/stage4_three_layer_diffusion/last.pt \
+  2>&1 | tee outputs/stage4_three_layer_diffusion/train_5gpu.log
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+{"epoch": 1, "train_loss": 32.668229648045134, "validation_normalized_noise_loss": 3.5949394702911377, "validation_region_normalized_noise_loss": 1.2920117378234863, "validation_syntax_normalized_noise_loss": 1.105
+360746383667, "validation_road_normalized_noise_loss": 1.1975669860839844, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015561194331558}
+{"epoch": 2, "train_loss": 25.09478419167655, "validation_normalized_noise_loss": 3.5934436321258545, "validation_region_normalized_noise_loss": 1.2910438776016235, "validation_syntax_normalized_noise_loss": 1.1051
+94330215454, "validation_road_normalized_noise_loss": 1.1972053050994873, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015560532057727}
+{"epoch": 3, "train_loss": 26.8566997391837, "validation_normalized_noise_loss": 3.588599681854248, "validation_region_normalized_noise_loss": 1.2879257202148438, "validation_syntax_normalized_noise_loss": 1.104630
+8279037476, "validation_road_normalized_noise_loss": 1.1960433721542358, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015558986752122}
+{"epoch": 4, "train_loss": 26.195184775761195, "validation_normalized_noise_loss": 3.5853512287139893, "validation_region_normalized_noise_loss": 1.2858493328094482, "validation_syntax_normalized_noise_loss": 1.104
+2306423187256, "validation_road_normalized_noise_loss": 1.195271611213684, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015558269288805}
+{"epoch": 5, "train_loss": 23.386223452431814, "validation_normalized_noise_loss": 3.5774519443511963, "validation_region_normalized_noise_loss": 1.280853271484375, "validation_syntax_normalized_noise_loss": 1.1031
+969785690308, "validation_road_normalized_noise_loss": 1.19340181350708, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015556613604227}
+{"epoch": 6, "train_loss": 19.285656656537736, "validation_normalized_noise_loss": 3.572906494140625, "validation_region_normalized_noise_loss": 1.2780181169509888, "validation_syntax_normalized_noise_loss": 1.1025
+644540786743, "validation_road_normalized_noise_loss": 1.192324161529541, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015555951330397}
+{"epoch": 7, "train_loss": 20.354651723589217, "validation_normalized_noise_loss": 3.5680339336395264, "validation_region_normalized_noise_loss": 1.2750054597854614, "validation_syntax_normalized_noise_loss": 1.101
+8611192703247, "validation_road_normalized_noise_loss": 1.191166877746582, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015556337656798}
+{"epoch": 8, "train_loss": 18.087135451180593, "validation_normalized_noise_loss": 3.5574257373809814, "validation_region_normalized_noise_loss": 1.2685190439224243, "validation_syntax_normalized_noise_loss": 1.100
+2670526504517, "validation_road_normalized_noise_loss": 1.1886396408081055, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.2001555578576194}
+Traceback (most recent call last):
+  File "/root/autodl-tmp/projects/Paper/scripts/train_three_layer_diffusion.py", line 416, in <module>
+    main()
+  File "/root/autodl-tmp/projects/Paper/scripts/train_three_layer_diffusion.py", line 363, in main
+    record["physical_generation"] = _evaluate_generation(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/scripts/train_three_layer_diffusion.py", line 188, in _evaluate_generation
+    output = system.generate(snapshot, high_features=high[snapshot.city_id], memory=memory)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/model.py", line 537, in generate
+    result = self.diffusion.generate(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/model.py", line 416, in generate
+    region_flat, sampling["region"] = self._sample_chunked(
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/model.py", line 289, in _sample_chunked
+    chunk, info = diffusion.sample(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/gaussian_diffusion.py", line 350, in sample
+    result = self._ddpm_sample(condition, initial_noise)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/gaussian_diffusion.py", line 287, in _ddpm_sample
+    prediction = self.model_predictions(
+  File "/root/autodl-tmp/projects/Paper/src/three_layer_diffusion/gaussian_diffusion.py", line 180, in model_predictions
+    raise ValueError("严格模式: epsilon estimator 输出非法")
+ValueError: 严格模式: epsilon estimator 输出非法
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 171650 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 171651 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 171652 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 171653 closing signal SIGTERM
+ERROR:torch.distributed.elastic.multiprocessing.api:failed (exitcode: 1) local_rank: 0 (pid: 171649) of binary: /root/miniconda3/bin/python
+Traceback (most recent call last):
+  File "/root/miniconda3/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/run.py", line 794, in main
+    run(args)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/run.py", line 785, in run
+    elastic_launch(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 250, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError:
+============================================================
+scripts/train_three_layer_diffusion.py FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-09-20_14:52:44
+  host      : autodl-container-afbc499dfb-7b31d3d2
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 171649)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# torchrun --standalone --nproc_per_node=5 scripts/train_three_layer_diffusion.py --config configs/stage4_three_layer_diffusion.yaml --dev
+ice cuda:0 --resume outputs/stage4_three_layer_diffusion/last.pt --max-
+  epochs 50
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+^CWARNING:torch.distributed.elastic.agent.server.api:Received 2 death signal, shutting down workers
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257069 closing signal SIGINT
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257070 closing signal SIGINT
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257071 closing signal SIGINT
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257072 closing signal SIGINT
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257073 closing signal SIGINT
+^CWARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257069 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257070 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257071 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257072 closing signal SIGTERM
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 257073 closing signal SIGTERM
+^CTraceback (most recent call last):
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 723, in run
+    result = self._invoke_run(role)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 864, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 256997 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 730, in run
+    self._shutdown(e.sigval)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 708, in _close
+    handler.proc.wait(time_to_wait)
+  File "/root/miniconda3/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/root/miniconda3/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 256997 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/miniconda3/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/run.py", line 794, in main
+    run(args)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/run.py", line 785, in run
+    elastic_launch(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 241, in launch_agent
+    result = agent.run()
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/metrics/api.py", line 129, in wrapper
+    result = f(*args, **kwargs)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 735, in run
+    self._shutdown()
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 708, in _close
+    handler.proc.wait(time_to_wait)
+  File "/root/miniconda3/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/root/miniconda3/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 256997 got signal: 2
+^C
+-bash: epochs: command not found
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# ^C
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# ^C
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# ^C
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# ^C
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# ^C
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# torchrun --standalone --nproc_per_node=5 scripts/train_three_layer_diffusion.py --config configs/stage4_three_layer_diffusion.yaml --dev
+ice cuda:0 --resume outputs/stage4_three_layer_diffusion/last.pt --max-epotchs 50
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+usage: train_three_layer_diffusion.py [-h] [--config CONFIG] [--device DEVICE] [--resume RESUME] [--max-epochs MAX_EPOCHS] [--max-train-snapshots MAX_TRAIN_SNAPSHOTS]
+                                      [--max-validation-snapshots MAX_VALIDATION_SNAPSHOTS]
+train_three_layer_diffusion.py: error: unrecognized arguments: --max-epotchs 50
+usage: train_three_layer_diffusion.py [-h] [--config CONFIG] [--device DEVICE] [--resume RESUME] [--max-epochs MAX_EPOCHS] [--max-train-snapshots MAX_TRAIN_SNAPSHOTS]
+                                      [--max-validation-snapshots MAX_VALIDATION_SNAPSHOTS]
+train_three_layer_diffusion.py: error: unrecognized arguments: --max-epotchs 50
+usage: train_three_layer_diffusion.py [-h] [--config CONFIG] [--device DEVICE] [--resume RESUME] [--max-epochs MAX_EPOCHS] [--max-train-snapshots MAX_TRAIN_SNAPSHOTS]
+                                      [--max-validation-snapshots MAX_VALIDATION_SNAPSHOTS]
+train_three_layer_diffusion.py: error: unrecognized arguments: --max-epotchs 50
+usage: train_three_layer_diffusion.py [-h] [--config CONFIG] [--device DEVICE] [--resume RESUME] [--max-epochs MAX_EPOCHS] [--max-train-snapshots MAX_TRAIN_SNAPSHOTS]
+                                      [--max-validation-snapshots MAX_VALIDATION_SNAPSHOTS]
+train_three_layer_diffusion.py: error: unrecognized arguments: --max-epotchs 50
+usage: train_three_layer_diffusion.py [-h] [--config CONFIG] [--device DEVICE] [--resume RESUME] [--max-epochs MAX_EPOCHS] [--max-train-snapshots MAX_TRAIN_SNAPSHOTS]
+                                      [--max-validation-snapshots MAX_VALIDATION_SNAPSHOTS]
+train_three_layer_diffusion.py: error: unrecognized arguments: --max-epotchs 50
+ERROR:torch.distributed.elastic.multiprocessing.api:failed (exitcode: 2) local_rank: 0 (pid: 257463) of binary: /root/miniconda3/bin/python
+Traceback (most recent call last):
+  File "/root/miniconda3/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/run.py", line 794, in main
+    run(args)
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/run.py", line 785, in run
+    elastic_launch(
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 250, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError:
+============================================================
+scripts/train_three_layer_diffusion.py FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-09-20_16:18:46
+  host      : autodl-container-afbc499dfb-7b31d3d2
+  rank      : 1 (local_rank: 1)
+  exitcode  : 2 (pid: 257464)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[2]:
+  time      : 2026-09-20_16:18:46
+  host      : autodl-container-afbc499dfb-7b31d3d2
+  rank      : 2 (local_rank: 2)
+  exitcode  : 2 (pid: 257465)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[3]:
+  time      : 2026-09-20_16:18:46
+  host      : autodl-container-afbc499dfb-7b31d3d2
+  rank      : 3 (local_rank: 3)
+  exitcode  : 2 (pid: 257466)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[4]:
+  time      : 2026-09-20_16:18:46
+  host      : autodl-container-afbc499dfb-7b31d3d2
+  rank      : 4 (local_rank: 4)
+  exitcode  : 2 (pid: 257467)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-09-20_16:18:46
+  host      : autodl-container-afbc499dfb-7b31d3d2
+  rank      : 0 (local_rank: 0)
+  exitcode  : 2 (pid: 257463)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+(base) root@autodl-container-afbc499dfb-7b31d3d2:~/autodl-tmp/projects/Paper# torchrun --standalone --nproc_per_node=5 \
+  scripts/train_three_layer_diffusion.py \
+  --config configs/stage4_three_layer_diffusion.yaml \
+  --device cuda:0 \
+  --resume outputs/stage4_three_layer_diffusion/last.pt \
+  --max-epochs 50
+master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+{"epoch": 10, "train_loss": 13.607970612389702, "validation_normalized_noise_loss": 3.539767026901245, "validation_region_normalized_noise_loss": 1.2579652070999146, "validation_syntax_normalized_noise_loss": 1.097
+4189043045044, "validation_road_normalized_noise_loss": 1.1843825578689575, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.2001555953864698}
+{"epoch": 11, "train_loss": 16.144975185394287, "validation_normalized_noise_loss": 3.533449411392212, "validation_region_normalized_noise_loss": 1.2542380094528198, "validation_syntax_normalized_noise_loss": 1.096
+354603767395, "validation_road_normalized_noise_loss": 1.1828566789627075, "validation_rag_mean_actual_top_k": 5.0, "validation_rag_mean_top1_weight": 0.20015560587247214}
+
